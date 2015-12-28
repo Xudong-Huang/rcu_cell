@@ -147,12 +147,29 @@ impl<T> Drop for RcuCell<T> {
 #[cfg(test)]
 mod test {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
-    fn single_thread_test() {
+    fn simple_drop() {
+        let _ = RcuCell::new(10);
+    }
+
+    #[test]
+    fn single_thread() {
         let t = RcuCell::new(10);
-        assert!(*t.read() == 10);
+        let x = t.read();
+        assert!(*x == 10);
         t.update(5);
+        let y = t.read();
+        assert!(*y == 5);
+    }
+
+    #[test]
+    fn single_thread_arc() {
+        let t = Arc::new(RcuCell::new(10));
+        let t1 = t.clone();
+        assert!(*t1.read() == 10);
+        t1.update(5);
         assert!(*t.read() == 5);
     }
 }
