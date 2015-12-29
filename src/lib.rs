@@ -1,8 +1,4 @@
 #![feature(shared)]
-#![feature(rustc_private)]
-
-#[macro_use]
-extern crate log;
 
 use std::ops::Deref;
 use std::ptr::Shared;
@@ -15,11 +11,13 @@ struct RcuInner<T> {
     data: T,
 }
 
-unsafe impl<T: Sync + Send> Send for RcuInner<T> {}
-unsafe impl<T: Sync + Send> Sync for RcuInner<T> {}
+unsafe impl<T: Send> Send for RcuInner<T> {}
+unsafe impl<T: Send> Sync for RcuInner<T> {}
 
 
 struct Link<T> {
+    // AtomicPtr not support ?Sized
+    // cause the RcuCell can't support ?Sized
     ptr: atomic::AtomicPtr<T>,
 }
 
@@ -27,15 +25,15 @@ pub struct RcuCell<T> {
     link: Link<RcuInner<T>>,
 }
 
-unsafe impl<T: Sync + Send> Send for RcuCell<T> {}
-unsafe impl<T: Sync + Send> Sync for RcuCell<T> {}
+unsafe impl<T: Send> Send for RcuCell<T> {}
+unsafe impl<T: Send> Sync for RcuCell<T> {}
 
 pub struct RcuReader<T> {
     inner: Shared<RcuInner<T>>,
 }
 
-unsafe impl<T: Sync + Send> Send for RcuReader<T> {}
-unsafe impl<T: Sync + Send> Sync for RcuReader<T> {}
+unsafe impl<T: Send> Send for RcuReader<T> {}
+unsafe impl<T: Send> Sync for RcuReader<T> {}
 
 impl<T> Deref for Link<T> {
     type Target = atomic::AtomicPtr<T>;
@@ -75,9 +73,6 @@ impl<T> RcuInner<T> {
     #[inline]
     fn release(&self) -> usize {
         let ret = self.refs.fetch_sub(1, Release);
-        // to prevent delete data unsyned
-        error!("{:?}", ret - 1);
-        atomic::fence(Acquire);
         ret - 1
     }
 }
@@ -87,7 +82,6 @@ impl<T> Drop for RcuReader<T> {
     fn drop(&mut self) {
         unsafe {
             if (**self.inner).release() == 0 {
-                error!("---------------------released");
                 // drop the inner box
                 let _: Box<RcuInner<T>> = Box::from_raw(*self.inner);
             }
@@ -101,6 +95,16 @@ impl<T> Deref for RcuReader<T> {
     #[inline]
     fn deref(&self) -> &T {
         unsafe { &(**self.inner).data }
+    }
+}
+
+impl<T> Clone for RcuReader<T> {
+    #[inline]
+    fn clone(&self) -> Self {
+        unsafe {
+            &(**self.inner).add_ref();
+        }
+        RcuReader { inner: self.inner }
     }
 }
 
@@ -147,7 +151,6 @@ impl<T> Drop for RcuCell<T> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use std::sync::Arc;
 
     #[test]
     fn simple_drop() {
@@ -158,14 +161,20 @@ mod test {
     fn single_thread() {
         let t = RcuCell::new(10);
         let x = t.read();
-        assert!(*x == 10);
-        t.update(5);
         let y = t.read();
-        assert!(*y == 5);
+        t.update(5);
+        let z = t.read();
+        let a = z.clone();
+        assert!(*x == 10);
+        assert!(*y == 10);
+        assert!(*z == 5);
+        assert!(*a == 5);
     }
 
     #[test]
     fn single_thread_arc() {
+        use std::sync::Arc;
+
         let t = Arc::new(RcuCell::new(10));
         let t1 = t.clone();
         assert!(*t1.read() == 10);
