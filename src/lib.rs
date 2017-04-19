@@ -2,7 +2,8 @@
 
 use std::ops::Deref;
 use std::ptr::Shared;
-use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+use std::marker::PhantomData;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(Debug)]
 struct RcuInner<T> {
@@ -15,9 +16,8 @@ unsafe impl<T: Send> Sync for RcuInner<T> {}
 
 
 struct Link<T> {
-    // AtomicPtr not support ?Sized
-    // cause the RcuCell can't support ?Sized
-    ptr: AtomicPtr<T>,
+    ptr: AtomicUsize,
+    phantom: PhantomData<*mut T>,
 }
 
 pub struct RcuCell<T> {
@@ -34,23 +34,24 @@ pub struct RcuReader<T> {
 unsafe impl<T: Send> Send for RcuReader<T> {}
 unsafe impl<T: Send> Sync for RcuReader<T> {}
 
-impl<T> Deref for Link<T> {
-    type Target = AtomicPtr<T>;
-
-    #[inline]
-    fn deref(&self) -> &AtomicPtr<T> {
-        &self.ptr
-    }
-}
-
 impl<T> Link<RcuInner<T>> {
     #[inline]
     fn get(&self) -> RcuReader<T> {
-        let ptr = self.load(Ordering::Acquire);
+        let ptr = self.ptr.load(Ordering::Acquire);
+        // clear the reserve bit
+        let ptr = (ptr & !1) as *mut RcuInner<T>;
         unsafe {
             (*ptr).add_ref();
             RcuReader { inner: Shared::new(ptr) }
         }
+    }
+
+    fn swap(&self, data: T) -> &RcuInner<T> {
+        let data = Box::new(RcuInner::new(data));
+        let new = Box::into_raw(data) as usize;
+        let old = self.ptr.swap(new, Ordering::AcqRel);
+        let old = (old & !1) as *const RcuInner<T>;
+        unsafe { &*old }
     }
 }
 
@@ -119,7 +120,12 @@ impl<T> RcuReader<T> {
 impl<T> RcuCell<T> {
     pub fn new(data: T) -> Self {
         let data = Box::new(RcuInner::new(data));
-        RcuCell { link: Link { ptr: AtomicPtr::new(Box::into_raw(data)) } }
+        RcuCell {
+            link: Link {
+                ptr: AtomicUsize::new(Box::into_raw(data) as usize),
+                phantom: PhantomData,
+            },
+        }
     }
 
     pub fn read(&self) -> RcuReader<T> {
@@ -127,15 +133,10 @@ impl<T> RcuCell<T> {
     }
 
     pub fn update(&self, data: T) {
-        let data = Box::new(RcuInner::new(data));
-        let old = self.link.swap(Box::into_raw(data), Ordering::AcqRel);
-
-        // release the old data
-        unsafe {
-            (*old).add_ref();
-            let d = RcuReader { inner: Shared::new(old) };
-            d.unlink();
-        }
+        let old = self.link.swap(data);
+        old.add_ref();
+        let d = RcuReader { inner: unsafe { Shared::new(old) } };
+        d.unlink();
     }
 }
 
