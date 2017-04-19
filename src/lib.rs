@@ -14,12 +14,13 @@ struct RcuInner<T> {
 unsafe impl<T: Send> Send for RcuInner<T> {}
 unsafe impl<T: Send> Sync for RcuInner<T> {}
 
-
+#[derive(Debug)]
 struct Link<T> {
     ptr: AtomicUsize,
     phantom: PhantomData<*mut T>,
 }
 
+#[derive(Debug)]
 pub struct RcuCell<T> {
     link: Link<RcuInner<T>>,
 }
@@ -34,6 +35,11 @@ pub struct RcuReader<T> {
 unsafe impl<T: Send> Send for RcuReader<T> {}
 unsafe impl<T: Send> Sync for RcuReader<T> {}
 
+#[derive(Debug)]
+pub struct RcuGuard<'a, T: 'a> {
+    inner: &'a RcuCell<T>,
+}
+
 impl<T> Link<RcuInner<T>> {
     #[inline]
     fn get(&self) -> RcuReader<T> {
@@ -46,12 +52,60 @@ impl<T> Link<RcuInner<T>> {
         }
     }
 
+    #[inline]
     fn swap(&self, data: T) -> &RcuInner<T> {
+        // we can sure that the update is
+        // only possible after get the guard
+        // in which the reserve bit must be true
         let data = Box::new(RcuInner::new(data));
-        let new = Box::into_raw(data) as usize;
-        let old = self.ptr.swap(new, Ordering::AcqRel);
+        let new = Box::into_raw(data) as usize | 1;
+        let mut old = self.ptr.load(Ordering::Acquire);
+
+        loop {
+            // should not change the reserve bit
+            // if old & 1 == 1 {
+            //     new |= 1;
+            // } else {
+            //     new &= !1;
+            // }
+            match self.ptr
+                      .compare_exchange(old, new, Ordering::AcqRel, Ordering::Relaxed) {
+                Ok(_) => break,
+                Err(x) => old = x,
+            }
+        }
+
+        // let old = self.ptr.swap(new, Ordering::AcqRel);
         let old = (old & !1) as *const RcuInner<T>;
         unsafe { &*old }
+    }
+
+    // only one thread can acquire the link successfully
+    fn acquire(&self) -> bool {
+        let mut old = self.ptr.load(Ordering::Acquire);
+        if old & 1 != 0 {
+            return false;
+        }
+
+        loop {
+            let new = old | 1;
+            println!("old={:x}, new={:x}", old, new);
+            match self.ptr
+                      .compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Relaxed) {
+                // successfully reserved
+                Ok(_) => return true,
+                // only try again if old value is still false
+                Err(x) if x & 1 == 0 => old = x,
+                // otherwise return false, which means the link is reserved by others
+                _ => return false,
+            }
+        }
+    }
+
+    // release only happened after acquire
+    fn release(&self) {
+        let ptr = self.ptr.load(Ordering::Acquire) & !1;
+        self.ptr.store(ptr, Ordering::Release);
     }
 }
 
@@ -99,7 +153,6 @@ impl<T> Deref for RcuReader<T> {
 }
 
 impl<T> Clone for RcuReader<T> {
-    #[inline]
     fn clone(&self) -> Self {
         unsafe {
             &(**self.inner).add_ref();
@@ -132,19 +185,39 @@ impl<T> RcuCell<T> {
         self.link.get()
     }
 
-    pub fn update(&self, data: T) {
+    // only work after get the guard
+    fn update(&self, data: T) {
         let old = self.link.swap(data);
         old.add_ref();
         let d = RcuReader { inner: unsafe { Shared::new(old) } };
         d.unlink();
     }
+
+    pub fn acquire(&self) -> Option<RcuGuard<T>> {
+        if self.link.acquire() {
+            return Some(RcuGuard { inner: self });
+        }
+        None
+    }
 }
 
 impl<T> Drop for RcuCell<T> {
-    #[inline]
     fn drop(&mut self) {
         let d = self.link.get();
         d.unlink();
+    }
+}
+
+impl<'a, T> RcuGuard<'a, T> {
+    pub fn update(&mut self, data: T) {
+        // the RcuCell is acquired now
+        self.inner.update(data);
+    }
+}
+
+impl<'a, T> Drop for RcuGuard<'a, T> {
+    fn drop(&mut self) {
+        self.inner.link.release();
     }
 }
 
@@ -180,5 +253,17 @@ mod test {
         assert!(*t1.read() == 10);
         t1.update(5);
         assert!(*t.read() == 5);
+    }
+
+    #[test]
+    fn test_rcu_guard() {
+        let t = RcuCell::new(10);
+        let x = t.read();
+        let mut g = t.acquire().unwrap();
+        let y = *x + 1;
+        g.update(y);
+        assert_eq!(t.acquire().is_none(), true);
+        drop(g);
+        assert_eq!(*t.read(), 11);
     }
 }
