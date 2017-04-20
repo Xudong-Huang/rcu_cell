@@ -53,6 +53,12 @@ impl<T> Link<RcuInner<T>> {
     }
 
     #[inline]
+    fn is_none(&self) -> bool {
+        let ptr = self.ptr.load(Ordering::Acquire);
+        self._conv(ptr).is_none()
+    }
+
+    #[inline]
     fn get(&self) -> Option<RcuReader<T>> {
         let ptr = self.ptr.load(Ordering::Acquire);
         self._conv(ptr)
@@ -202,6 +208,11 @@ impl<T> RcuCell<T> {
         }
     }
 
+    #[inline]
+    pub fn is_none(&self) -> bool {
+        self.link.is_none()
+    }
+
     pub fn read(&self) -> Option<RcuReader<T>> {
         self.link.get()
     }
@@ -267,6 +278,7 @@ mod test {
         t.update(None);
         let z = t.read();
         let a = z.clone();
+        drop(t); // t can be dropped before reader
         assert_eq!(x.map(|v| *v), Some(10));
         assert_eq!(y.map(|v| *v), Some(10));
         assert_eq!(z.map(|v| *v), None);
@@ -294,5 +306,13 @@ mod test {
         assert_eq!(t.acquire().is_none(), true);
         drop(g);
         assert_eq!(t.read().map(|v| *v), Some(11));
+    }
+
+    #[test]
+    fn test_is_none() {
+        let t = RcuCell::new(Some(10));
+        assert_eq!(t.is_none(), false);
+        t.acquire().unwrap().update(None);
+        assert_eq!(t.is_none(), true);
     }
 }
