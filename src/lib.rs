@@ -41,24 +41,40 @@ pub struct RcuGuard<'a, T: 'a> {
 }
 
 impl<T> Link<RcuInner<T>> {
+    // convert from usize to ref
     #[inline]
-    fn get(&self) -> RcuReader<T> {
-        let ptr = self.ptr.load(Ordering::Acquire);
-        // clear the reserve bit
-        let ptr = (ptr & !1) as *mut RcuInner<T>;
-        unsafe {
-            (*ptr).add_ref();
-            RcuReader { inner: Shared::new(ptr) }
+    fn _conv(&self, ptr: usize) -> Option<&RcuInner<T>> {
+        // ignore the reserve bit
+        let ptr = ptr & !1;
+        if ptr == 0 {
+            return None;
         }
+        Some(unsafe { &*(ptr as *const RcuInner<T>) })
     }
 
     #[inline]
-    fn swap(&self, data: T) -> &RcuInner<T> {
+    fn get(&self) -> Option<RcuReader<T>> {
+        let ptr = self.ptr.load(Ordering::Acquire);
+        self._conv(ptr)
+            .map(|ptr| unsafe {
+                     (*ptr).add_ref();
+                     RcuReader { inner: Shared::new(ptr) }
+                 })
+    }
+
+    #[inline]
+    fn swap(&self, data: Option<T>) -> Option<&RcuInner<T>> {
         // we can sure that the update is
         // only possible after get the guard
-        // in which the reserve bit must be true
-        let data = Box::new(RcuInner::new(data));
-        let new = Box::into_raw(data) as usize | 1;
+        // in which case the reserve bit must be set
+        let new = match data {
+            Some(v) => {
+                let data = Box::new(RcuInner::new(v));
+                Box::into_raw(data) as usize | 1
+            }
+            None => 1,
+        };
+
         let mut old = self.ptr.load(Ordering::Acquire);
 
         loop {
@@ -75,9 +91,7 @@ impl<T> Link<RcuInner<T>> {
             }
         }
 
-        // let old = self.ptr.swap(new, Ordering::AcqRel);
-        let old = (old & !1) as *const RcuInner<T>;
-        unsafe { &*old }
+        self._conv(old)
     }
 
     // only one thread can acquire the link successfully
@@ -171,26 +185,38 @@ impl<T> RcuReader<T> {
 }
 
 impl<T> RcuCell<T> {
-    pub fn new(data: T) -> Self {
-        let data = Box::new(RcuInner::new(data));
+    pub fn new(data: Option<T>) -> Self {
+        let ptr = match data {
+            Some(data) => {
+                let data = Box::new(RcuInner::new(data));
+                Box::into_raw(data) as usize
+            }
+            None => 0,
+        };
+
         RcuCell {
             link: Link {
-                ptr: AtomicUsize::new(Box::into_raw(data) as usize),
+                ptr: AtomicUsize::new(ptr),
                 phantom: PhantomData,
             },
         }
     }
 
-    pub fn read(&self) -> RcuReader<T> {
+    pub fn read(&self) -> Option<RcuReader<T>> {
         self.link.get()
     }
 
     // only work after get the guard
-    fn update(&self, data: T) {
+    fn update(&self, data: Option<T>) {
         let old = self.link.swap(data);
-        old.add_ref();
-        let d = RcuReader { inner: unsafe { Shared::new(old) } };
-        d.unlink();
+        match old {
+            Some(old) => {
+                old.add_ref();
+                let d = RcuReader { inner: unsafe { Shared::new(old) } };
+                d.unlink();
+            }
+            _ => (),
+        }
     }
 
     pub fn acquire(&self) -> Option<RcuGuard<T>> {
@@ -203,16 +229,19 @@ impl<T> RcuCell<T> {
 
 impl<T> Drop for RcuCell<T> {
     fn drop(&mut self) {
-        let d = self.link.get();
-        d.unlink();
+        self.link.get().map(|d| d.unlink());
     }
 }
 
 impl<'a, T> RcuGuard<'a, T> {
-    pub fn update(&mut self, data: T) {
+    // update the RcuCell with a value
+    pub fn update(&mut self, data: Option<T>) {
         // the RcuCell is acquired now
         self.inner.update(data);
     }
+
+    // remove data from the RcuCell
+    pub fn remove(&mut self) {}
 }
 
 impl<'a, T> Drop for RcuGuard<'a, T> {
@@ -227,43 +256,43 @@ mod test {
 
     #[test]
     fn simple_drop() {
-        let _ = RcuCell::new(10);
+        let _ = RcuCell::new(Some(10));
     }
 
     #[test]
     fn single_thread() {
-        let t = RcuCell::new(10);
+        let t = RcuCell::new(Some(10));
         let x = t.read();
         let y = t.read();
-        t.update(5);
+        t.update(None);
         let z = t.read();
         let a = z.clone();
-        assert!(*x == 10);
-        assert!(*y == 10);
-        assert!(*z == 5);
-        assert!(*a == 5);
+        assert_eq!(x.map(|v| *v), Some(10));
+        assert_eq!(y.map(|v| *v), Some(10));
+        assert_eq!(z.map(|v| *v), None);
+        assert_eq!(a.map(|v| *v), None);
     }
 
     #[test]
     fn single_thread_arc() {
         use std::sync::Arc;
 
-        let t = Arc::new(RcuCell::new(10));
+        let t = Arc::new(RcuCell::new(Some(10)));
         let t1 = t.clone();
-        assert!(*t1.read() == 10);
-        t1.update(5);
-        assert!(*t.read() == 5);
+        assert!(t1.read().map(|v| *v) == Some(10));
+        t1.update(Some(5));
+        assert!(t.read().map(|v| *v) == Some(5));
     }
 
     #[test]
     fn test_rcu_guard() {
-        let t = RcuCell::new(10);
-        let x = t.read();
+        let t = RcuCell::new(Some(10));
+        let x = t.read().map(|v| *v);
         let mut g = t.acquire().unwrap();
-        let y = *x + 1;
+        let y = x.map(|v| v + 1);
         g.update(y);
         assert_eq!(t.acquire().is_none(), true);
         drop(g);
-        assert_eq!(*t.read(), 11);
+        assert_eq!(t.read().map(|v| *v), Some(11));
     }
 }
