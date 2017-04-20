@@ -55,7 +55,17 @@ impl<T> Link<RcuInner<T>> {
     #[inline]
     fn is_none(&self) -> bool {
         let ptr = self.ptr.load(Ordering::Acquire);
-        self._conv(ptr).is_none()
+        let ptr = ptr & !1;
+        if ptr == 0 {
+            return true;
+        }
+        false
+    }
+
+    #[inline]
+    fn is_locked(&self) -> bool {
+        let ptr = self.ptr.load(Ordering::Acquire);
+        ptr & 1 == 1
     }
 
     #[inline]
@@ -212,6 +222,11 @@ impl<T> RcuCell<T> {
         self.link.is_none()
     }
 
+    #[inline]
+    pub fn is_locked(&self) -> bool {
+        self.link.is_locked()
+    }
+
     pub fn read(&self) -> Option<RcuReader<T>> {
         self.link.get()
     }
@@ -313,5 +328,16 @@ mod test {
         assert_eq!(t.is_none(), false);
         t.acquire().unwrap().update(None);
         assert_eq!(t.is_none(), true);
+    }
+
+    #[test]
+    fn test_is_locked() {
+        let t = RcuCell::new(Some(10));
+        assert_eq!(t.is_locked(), false);
+        let mut g = t.acquire().unwrap();
+        g.update(None);
+        assert_eq!(t.is_locked(), true);
+        drop(g);
+        assert_eq!(t.is_locked(), false);
     }
 }
