@@ -109,7 +109,6 @@ impl<T> Link<RcuInner<T>> {
 
         loop {
             let new = old | 1;
-            println!("old={:x}, new={:x}", old, new);
             match self.ptr
                       .compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Relaxed) {
                 // successfully reserved
