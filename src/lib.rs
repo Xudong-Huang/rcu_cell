@@ -265,8 +265,10 @@ impl<'a, T> RcuGuard<'a, T> {
         self.inner.update(data);
     }
 
-    // remove data from the RcuCell
-    pub fn remove(&mut self) {}
+    // read the guard, same as RcuCell::read()
+    pub fn read(&self) -> Option<RcuReader<T>> {
+        self.inner.read()
+    }
 }
 
 impl<'a, T> Drop for RcuGuard<'a, T> {
