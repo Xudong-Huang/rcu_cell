@@ -265,9 +265,26 @@ impl<'a, T> RcuGuard<'a, T> {
         self.inner.update(data);
     }
 
-    // read the guard, same as RcuCell::read()
-    pub fn read(&self) -> Option<RcuReader<T>> {
-        self.inner.read()
+    pub fn as_mut(&mut self) -> Option<&mut T> {
+        // since it's locked and it's safe to update the data
+        // ignore the reserve bit
+        let ptr = self.inner.link.ptr.load(Ordering::Relaxed) & !1;
+        if ptr == 0 {
+            return None;
+        }
+        let inner = unsafe { &mut *(ptr as *mut RcuInner<T>) };
+        Some(&mut inner.data)
+    }
+
+    pub fn as_ref(&self) -> Option<&T> {
+        // it's safe the get the ref since locked
+        // ignore the reserve bit
+        let ptr = self.inner.link.ptr.load(Ordering::Relaxed) & !1;
+        if ptr == 0 {
+            return None;
+        }
+        let inner = unsafe { &*(ptr as *const RcuInner<T>) };
+        Some(&inner.data)
     }
 }
 
@@ -341,5 +358,17 @@ mod test {
         assert_eq!(t.is_locked(), true);
         drop(g);
         assert_eq!(t.is_locked(), false);
+    }
+
+    #[test]
+    fn test_as_mut() {
+        let t = RcuCell::new(Some(10));
+        let mut g = t.acquire().unwrap();
+        assert_eq!(g.as_ref(), Some(&10));
+        // change the internal data with lock
+        g.as_mut().map(|d| *d = 20);
+        drop(g);
+        let x = t.read().unwrap();
+        assert_eq!(*x, 20);
     }
 }
