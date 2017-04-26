@@ -244,7 +244,7 @@ impl<T> RcuCell<T> {
         }
     }
 
-    pub fn acquire(&self) -> Option<RcuGuard<T>> {
+    pub fn try_lock(&self) -> Option<RcuGuard<T>> {
         if self.link.acquire() {
             return Some(RcuGuard { inner: self });
         }
@@ -333,10 +333,10 @@ mod test {
     fn test_rcu_guard() {
         let t = RcuCell::new(Some(10));
         let x = t.read().map(|v| *v);
-        let mut g = t.acquire().unwrap();
+        let mut g = t.try_lock().unwrap();
         let y = x.map(|v| v + 1);
         g.update(y);
-        assert_eq!(t.acquire().is_none(), true);
+        assert_eq!(t.try_lock().is_none(), true);
         drop(g);
         assert_eq!(t.read().map(|v| *v), Some(11));
     }
@@ -345,7 +345,7 @@ mod test {
     fn test_is_none() {
         let t = RcuCell::new(Some(10));
         assert_eq!(t.is_none(), false);
-        t.acquire().unwrap().update(None);
+        t.try_lock().unwrap().update(None);
         assert_eq!(t.is_none(), true);
     }
 
@@ -353,7 +353,7 @@ mod test {
     fn test_is_locked() {
         let t = RcuCell::new(Some(10));
         assert_eq!(t.is_locked(), false);
-        let mut g = t.acquire().unwrap();
+        let mut g = t.try_lock().unwrap();
         g.update(None);
         assert_eq!(t.is_locked(), true);
         drop(g);
@@ -363,7 +363,7 @@ mod test {
     #[test]
     fn test_as_mut() {
         let t = RcuCell::new(Some(10));
-        let mut g = t.acquire().unwrap();
+        let mut g = t.try_lock().unwrap();
         assert_eq!(g.as_ref(), Some(&10));
         // change the internal data with lock
         g.as_mut().map(|d| *d = 20);
