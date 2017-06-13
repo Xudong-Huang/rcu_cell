@@ -1,5 +1,6 @@
 #![feature(shared)]
 
+use std::sync::Arc;
 use std::ops::Deref;
 use std::ptr::Shared;
 use std::marker::PhantomData;
@@ -22,7 +23,7 @@ struct Link<T> {
 
 #[derive(Debug)]
 pub struct RcuCell<T> {
-    link: Link<RcuInner<T>>,
+    link: Arc<Link<RcuInner<T>>>,
 }
 
 unsafe impl<T: Send> Send for RcuCell<T> {}
@@ -36,8 +37,8 @@ unsafe impl<T: Send> Send for RcuReader<T> {}
 unsafe impl<T: Send> Sync for RcuReader<T> {}
 
 #[derive(Debug)]
-pub struct RcuGuard<'a, T: 'a> {
-    inner: &'a RcuCell<T>,
+pub struct RcuGuard<T> {
+    link: Arc<Link<RcuInner<T>>>,
 }
 
 impl<T> Link<RcuInner<T>> {
@@ -210,10 +211,10 @@ impl<T> RcuCell<T> {
         };
 
         RcuCell {
-            link: Link {
-                ptr: AtomicUsize::new(ptr),
-                phantom: PhantomData,
-            },
+            link: Arc::new(Link {
+                               ptr: AtomicUsize::new(ptr),
+                               phantom: PhantomData,
+                           }),
         }
     }
 
@@ -231,22 +232,9 @@ impl<T> RcuCell<T> {
         self.link.get()
     }
 
-    // only work after get the guard
-    fn update(&self, data: Option<T>) {
-        let old = self.link.swap(data);
-        match old {
-            Some(old) => {
-                old.add_ref();
-                let d = RcuReader { inner: unsafe { Shared::new(old) } };
-                d.unlink();
-            }
-            _ => (),
-        }
-    }
-
     pub fn try_lock(&self) -> Option<RcuGuard<T>> {
         if self.link.acquire() {
-            return Some(RcuGuard { inner: self });
+            return Some(RcuGuard { link: self.link.clone() });
         }
         None
     }
@@ -258,17 +246,25 @@ impl<T> Drop for RcuCell<T> {
     }
 }
 
-impl<'a, T> RcuGuard<'a, T> {
+impl<T> RcuGuard<T> {
     // update the RcuCell with a value
     pub fn update(&mut self, data: Option<T>) {
         // the RcuCell is acquired now
-        self.inner.update(data);
+        let old = self.link.swap(data);
+        match old {
+            Some(old) => {
+                old.add_ref();
+                let d = RcuReader { inner: unsafe { Shared::new(old) } };
+                d.unlink();
+            }
+            _ => (),
+        }
     }
 
     pub fn as_mut(&mut self) -> Option<&mut T> {
         // since it's locked and it's safe to update the data
         // ignore the reserve bit
-        let ptr = self.inner.link.ptr.load(Ordering::Relaxed) & !1;
+        let ptr = self.link.ptr.load(Ordering::Relaxed) & !1;
         if ptr == 0 {
             return None;
         }
@@ -279,7 +275,7 @@ impl<'a, T> RcuGuard<'a, T> {
     pub fn as_ref(&self) -> Option<&T> {
         // it's safe the get the ref since locked
         // ignore the reserve bit
-        let ptr = self.inner.link.ptr.load(Ordering::Relaxed) & !1;
+        let ptr = self.link.ptr.load(Ordering::Relaxed) & !1;
         if ptr == 0 {
             return None;
         }
@@ -288,9 +284,9 @@ impl<'a, T> RcuGuard<'a, T> {
     }
 }
 
-impl<'a, T> Drop for RcuGuard<'a, T> {
+impl<T> Drop for RcuGuard<T> {
     fn drop(&mut self) {
-        self.inner.link.release();
+        self.link.release();
     }
 }
 
@@ -308,7 +304,7 @@ mod test {
         let t = RcuCell::new(Some(10));
         let x = t.read();
         let y = t.read();
-        t.update(None);
+        t.try_lock().unwrap().update(None);
         let z = t.read();
         let a = z.clone();
         drop(t); // t can be dropped before reader
@@ -325,7 +321,7 @@ mod test {
         let t = Arc::new(RcuCell::new(Some(10)));
         let t1 = t.clone();
         assert!(t1.read().map(|v| *v) == Some(10));
-        t1.update(Some(5));
+        t1.try_lock().unwrap().update(Some(5));
         assert!(t.read().map(|v| *v) == Some(5));
     }
 
