@@ -74,8 +74,8 @@ impl<T> Link<RcuInner<T>> {
         let ptr = self.ptr.load(Ordering::Acquire);
         self._conv(ptr)
             .map(|ptr| unsafe {
-                     (*ptr).add_ref();
-                     RcuReader { inner: Shared::new(ptr) }
+                     ptr.add_ref();
+                     RcuReader { inner: Shared::new(ptr as *const _ as *mut _) }
                  })
     }
 
@@ -165,9 +165,9 @@ impl<T> Drop for RcuReader<T> {
     #[inline]
     fn drop(&mut self) {
         unsafe {
-            if (**self.inner).release() == 0 {
+            if self.inner.as_ref().release() == 0 {
                 // drop the inner box
-                let _: Box<RcuInner<T>> = Box::from_raw(self.inner.as_mut_ptr());
+                let _: Box<RcuInner<T>> = Box::from_raw(self.inner.as_ptr());
             }
         }
     }
@@ -178,14 +178,14 @@ impl<T> Deref for RcuReader<T> {
 
     #[inline]
     fn deref(&self) -> &T {
-        unsafe { &(**self.inner).data }
+        unsafe { &self.inner.as_ref().data }
     }
 }
 
 impl<T> Clone for RcuReader<T> {
     fn clone(&self) -> Self {
         unsafe {
-            &(**self.inner).add_ref();
+            self.inner.as_ref().add_ref();
         }
         RcuReader { inner: self.inner }
     }
@@ -195,7 +195,7 @@ impl<T> RcuReader<T> {
     #[inline]
     fn unlink(&self) {
         unsafe {
-            (**self.inner).release();
+            self.inner.as_ref().release();
         }
     }
 }
@@ -254,7 +254,9 @@ impl<T> RcuGuard<T> {
         match old {
             Some(old) => {
                 old.add_ref();
-                let d = RcuReader { inner: unsafe { Shared::new(old) } };
+                let d = RcuReader {
+                    inner: unsafe { Shared::new(old as *const _ as *mut RcuInner<T>) },
+                };
                 d.unlink();
             }
             _ => (),
