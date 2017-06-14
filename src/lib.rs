@@ -12,9 +12,6 @@ struct RcuInner<T> {
     data: T,
 }
 
-unsafe impl<T: Send> Send for RcuInner<T> {}
-unsafe impl<T: Send> Sync for RcuInner<T> {}
-
 #[derive(Debug)]
 struct Link<T> {
     ptr: AtomicUsize,
@@ -26,20 +23,23 @@ pub struct RcuCell<T> {
     link: Arc<Link<RcuInner<T>>>,
 }
 
-unsafe impl<T: Send> Send for RcuCell<T> {}
-unsafe impl<T: Send> Sync for RcuCell<T> {}
+unsafe impl<T> Send for RcuCell<T> {}
+unsafe impl<T> Sync for RcuCell<T> {}
 
 pub struct RcuReader<T> {
     inner: Shared<RcuInner<T>>,
 }
 
 unsafe impl<T: Send> Send for RcuReader<T> {}
-unsafe impl<T: Send> Sync for RcuReader<T> {}
+unsafe impl<T: Sync> Sync for RcuReader<T> {}
 
 #[derive(Debug)]
 pub struct RcuGuard<T> {
     link: Arc<Link<RcuInner<T>>>,
 }
+
+unsafe impl<T: Send> Send for RcuGuard<T> {}
+unsafe impl<T: Sync> Sync for RcuGuard<T> {}
 
 impl<T> Link<RcuInner<T>> {
     // convert from usize to ref
