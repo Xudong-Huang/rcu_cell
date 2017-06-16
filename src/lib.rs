@@ -72,11 +72,10 @@ impl<T> Link<RcuInner<T>> {
     #[inline]
     fn get(&self) -> Option<RcuReader<T>> {
         let ptr = self.ptr.load(Ordering::Acquire);
-        self._conv(ptr)
-            .map(|ptr| unsafe {
-                     ptr.add_ref();
-                     RcuReader { inner: Shared::new(ptr as *const _ as *mut _) }
-                 })
+        self._conv(ptr).map(|ptr| unsafe {
+            ptr.add_ref();
+            RcuReader { inner: Shared::new(ptr as *const _ as *mut _) }
+        })
     }
 
     #[inline]
@@ -101,8 +100,12 @@ impl<T> Link<RcuInner<T>> {
             // } else {
             //     new &= !1;
             // }
-            match self.ptr
-                      .compare_exchange(old, new, Ordering::AcqRel, Ordering::Relaxed) {
+            match self.ptr.compare_exchange(
+                old,
+                new,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
                 Ok(_) => break,
                 Err(x) => old = x,
             }
@@ -120,8 +123,12 @@ impl<T> Link<RcuInner<T>> {
 
         loop {
             let new = old | 1;
-            match self.ptr
-                      .compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Relaxed) {
+            match self.ptr.compare_exchange_weak(
+                old,
+                new,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
                 // successfully reserved
                 Ok(_) => return true,
                 // only try again if old value is still false
@@ -212,9 +219,9 @@ impl<T> RcuCell<T> {
 
         RcuCell {
             link: Arc::new(Link {
-                               ptr: AtomicUsize::new(ptr),
-                               phantom: PhantomData,
-                           }),
+                ptr: AtomicUsize::new(ptr),
+                phantom: PhantomData,
+            }),
         }
     }
 
@@ -250,16 +257,12 @@ impl<T> RcuGuard<T> {
     // update the RcuCell with a value
     pub fn update(&mut self, data: Option<T>) {
         // the RcuCell is acquired now
-        let old = self.link.swap(data);
-        match old {
-            Some(old) => {
-                old.add_ref();
-                let d = RcuReader {
-                    inner: unsafe { Shared::new(old as *const _ as *mut RcuInner<T>) },
-                };
-                d.unlink();
-            }
-            _ => (),
+        let old_link = self.link.swap(data);
+        if let Some(old) = old_link {
+            old.add_ref();
+            let ptr = unsafe { Shared::new(old as *const _ as *mut _) };
+            let d = RcuReader::<T> { inner: ptr };
+            d.unlink();
         }
     }
 
