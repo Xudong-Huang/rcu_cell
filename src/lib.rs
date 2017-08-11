@@ -72,9 +72,9 @@ impl<T> Link<RcuInner<T>> {
     #[inline]
     fn get(&self) -> Option<RcuReader<T>> {
         let ptr = self.ptr.load(Ordering::Acquire);
-        self._conv(ptr).map(|ptr| unsafe {
+        self._conv(ptr).map(|ptr| {
             ptr.add_ref();
-            RcuReader { inner: Shared::new(ptr as *const _ as *mut _) }
+            RcuReader { inner: Shared::new(ptr as *const _ as *mut _).expect("null shared") }
         })
     }
 
@@ -260,7 +260,7 @@ impl<T> RcuGuard<T> {
         let old_link = self.link.swap(data);
         if let Some(old) = old_link {
             old.add_ref();
-            let ptr = unsafe { Shared::new(old as *const _ as *mut _) };
+            let ptr = Shared::new(old as *const _ as *mut _).expect("null Shared");
             let d = RcuReader::<T> { inner: ptr };
             d.unlink();
         }
