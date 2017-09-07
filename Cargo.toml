@@ -2,3 +2,7 @@
 name = "rcu_cell"
 version = "0.1.0"
 authors = ["Xudong Huang <huangxu008@hotmail.com>"]
+build = "build.rs"
+
+[build-dependencies]
+rustc_version = "0.2"

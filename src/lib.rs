@@ -1,10 +1,17 @@
-#![feature(shared)]
+#![cfg_attr(nightly, feature(shared))]
+
+#[cfg(nightly)]
+use std::ptr::Shared;
+#[cfg(not(nightly))]
+mod shared;
+#[cfg(not(nightly))]
+use shared::Shared;
 
 use std::sync::Arc;
 use std::ops::Deref;
-use std::ptr::Shared;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicUsize, Ordering};
+
 
 #[derive(Debug)]
 struct RcuInner<T> {
