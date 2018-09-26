@@ -1,4 +1,4 @@
-[![Build Status](https://travis-ci.org/Xudong-Huang/may.svg?branch=master)](https://travis-ci.org/Xudong-Huang/rcu_cell)
+[![Build Status](https://travis-ci.org/Xudong-Huang/rcu_cell.svg?branch=master)](https://travis-ci.org/Xudong-Huang/rcu_cell)
 [![Current Crates.io Version](https://img.shields.io/crates/v/rcu_cell.svg)](https://crates.io/crates/rcu_cell)
 [![Document](https://img.shields.io/badge/doc-rcu_cell-green.svg)](https://docs.rs/rcu_cell)
 
