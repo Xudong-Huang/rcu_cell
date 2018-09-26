@@ -1,13 +1,22 @@
 [package]
 name = "rcu_cell"
+version = "0.1.0"
 description = "a lockless rcu cell implementation"
 authors = ["Xudong Huang <huangxu008@hotmail.com>"]
 categories = ["non-blocking", "rcu", "atomic", "lock-free"]
 keywords = ["rcu", "lockless", "atomic"]
 repository = "https://github.com/Xudong-Huang/rcu_cell"
+homepage = "https://github.com/Xudong-Huang/rcu_cell"
+documentation = "https://docs.rs/rcu_cell"
 license = "LGPL-3.0"
 readme = "./README.md"
-version = "0.1.0"
+exclude = [
+    ".gitignore",
+    ".travis.yml",
+    "appveyor.yml",
+    "benches/**/*",
+    "docs/**/*",
+]
 
 [badges]
 travis-ci = { repository = "Xudong-Huang/rcu_cell" }
