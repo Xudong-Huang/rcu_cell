@@ -1,7 +1,6 @@
-use std::ptr::NonNull;
-
 use std::marker::PhantomData;
 use std::ops::Deref;
+use std::ptr::NonNull;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -17,7 +16,7 @@ struct Link<T> {
     phantom: PhantomData<*mut T>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RcuCell<T> {
     link: Arc<Link<RcuInner<T>>>,
 }
