@@ -16,7 +16,7 @@ struct Link<T> {
     phantom: PhantomData<*mut T>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct RcuCell<T> {
     link: Arc<Link<RcuInner<T>>>,
 }
@@ -71,7 +71,7 @@ impl<T> Link<RcuInner<T>> {
     fn get(&self) -> Option<RcuReader<T>> {
         let ptr = self.ptr.load(Ordering::Acquire);
         self._conv(ptr).map(|ptr| {
-            ptr.add_ref();
+            ptr.inc_ref();
             RcuReader {
                 inner: NonNull::new(ptr as *const _ as *mut _).expect("null shared"),
             }
@@ -152,12 +152,12 @@ impl<T> RcuInner<T> {
     }
 
     #[inline]
-    fn add_ref(&self) {
+    fn inc_ref(&self) {
         self.refs.fetch_add(1, Ordering::Relaxed);
     }
 
     #[inline]
-    fn release(&self) -> usize {
+    fn dec_ref(&self) -> usize {
         let ret = self.refs.fetch_sub(1, Ordering::Relaxed);
         ret - 1
     }
@@ -167,7 +167,7 @@ impl<T> Drop for RcuReader<T> {
     #[inline]
     fn drop(&mut self) {
         unsafe {
-            if self.inner.as_ref().release() == 0 {
+            if self.inner.as_ref().dec_ref() == 0 {
                 // drop the inner box
                 let _: Box<RcuInner<T>> = Box::from_raw(self.inner.as_ptr());
             }
@@ -187,7 +187,7 @@ impl<T> Deref for RcuReader<T> {
 impl<T> Clone for RcuReader<T> {
     fn clone(&self) -> Self {
         unsafe {
-            self.inner.as_ref().add_ref();
+            self.inner.as_ref().inc_ref();
         }
         RcuReader { inner: self.inner }
     }
@@ -195,9 +195,16 @@ impl<T> Clone for RcuReader<T> {
 
 impl<T> RcuReader<T> {
     #[inline]
-    fn unlink(&self) {
+    fn inc_link(&self) {
         unsafe {
-            self.inner.as_ref().release();
+            self.inner.as_ref().inc_ref();
+        }
+    }
+
+    #[inline]
+    fn dec_link(&self) {
+        unsafe {
+            self.inner.as_ref().dec_ref();
         }
     }
 }
@@ -244,9 +251,18 @@ impl<T> RcuCell<T> {
     }
 }
 
+impl<T> Clone for RcuCell<T> {
+    fn clone(&self) -> Self {
+        // we need to inc ref for the underlining data
+        let link = self.link.clone();
+        link.get().map(|d| d.inc_link());
+        Self { link }
+    }
+}
+
 impl<T> Drop for RcuCell<T> {
     fn drop(&mut self) {
-        self.link.get().map(|d| d.unlink());
+        self.link.get().map(|d| d.dec_link());
     }
 }
 
@@ -256,10 +272,10 @@ impl<T> RcuGuard<T> {
         // the RcuCell is acquired now
         let old_link = self.link.swap(data);
         if let Some(old) = old_link {
-            old.add_ref();
+            old.inc_ref();
             let ptr = NonNull::new(old as *const _ as *mut _).expect("null Shared");
             let d = RcuReader::<T> { inner: ptr };
-            d.unlink();
+            d.dec_link();
         }
     }
 
@@ -368,5 +384,22 @@ mod test {
         drop(g);
         let x = t.read().unwrap();
         assert_eq!(*x, 20);
+    }
+
+    #[test]
+    fn test_clone_rcu_cell() {
+        let t = RcuCell::new(Some(10));
+        let t1 = t.clone();
+        let t2 = t.clone();
+        let t3 = t.clone();
+        t1.try_lock().unwrap().as_mut().map(|d| *d = 11);
+        drop(t1);
+        assert_eq!(t.read().map(|v| *v), Some(11));
+        t2.try_lock().unwrap().as_mut().map(|d| *d = 12);
+        drop(t2);
+        assert_eq!(t.read().map(|v| *v), Some(12));
+        t3.try_lock().unwrap().as_mut().map(|d| *d = 13);
+        drop(t3);
+        assert_eq!(t.read().map(|v| *v), Some(13));
     }
 }
