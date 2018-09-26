@@ -1,17 +1,9 @@
-#![cfg_attr(nightly, feature(shared))]
+use std::ptr::NonNull;
 
-#[cfg(nightly)]
-use std::ptr::Shared;
-#[cfg(not(nightly))]
-mod shared;
-#[cfg(not(nightly))]
-use shared::Shared;
-
-use std::sync::Arc;
-use std::ops::Deref;
 use std::marker::PhantomData;
+use std::ops::Deref;
 use std::sync::atomic::{AtomicUsize, Ordering};
-
+use std::sync::Arc;
 
 #[derive(Debug)]
 struct RcuInner<T> {
@@ -34,7 +26,7 @@ unsafe impl<T> Send for RcuCell<T> {}
 unsafe impl<T> Sync for RcuCell<T> {}
 
 pub struct RcuReader<T> {
-    inner: Shared<RcuInner<T>>,
+    inner: NonNull<RcuInner<T>>,
 }
 
 unsafe impl<T: Send> Send for RcuReader<T> {}
@@ -81,7 +73,9 @@ impl<T> Link<RcuInner<T>> {
         let ptr = self.ptr.load(Ordering::Acquire);
         self._conv(ptr).map(|ptr| {
             ptr.add_ref();
-            RcuReader { inner: Shared::new(ptr as *const _ as *mut _).expect("null shared") }
+            RcuReader {
+                inner: NonNull::new(ptr as *const _ as *mut _).expect("null shared"),
+            }
         })
     }
 
@@ -107,12 +101,10 @@ impl<T> Link<RcuInner<T>> {
             // } else {
             //     new &= !1;
             // }
-            match self.ptr.compare_exchange(
-                old,
-                new,
-                Ordering::AcqRel,
-                Ordering::Relaxed,
-            ) {
+            match self
+                .ptr
+                .compare_exchange(old, new, Ordering::AcqRel, Ordering::Relaxed)
+            {
                 Ok(_) => break,
                 Err(x) => old = x,
             }
@@ -130,12 +122,10 @@ impl<T> Link<RcuInner<T>> {
 
         loop {
             let new = old | 1;
-            match self.ptr.compare_exchange_weak(
-                old,
-                new,
-                Ordering::AcqRel,
-                Ordering::Relaxed,
-            ) {
+            match self
+                .ptr
+                .compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Relaxed)
+            {
                 // successfully reserved
                 Ok(_) => return true,
                 // only try again if old value is still false
@@ -160,7 +150,6 @@ impl<T> RcuInner<T> {
             refs: AtomicUsize::new(1),
             data: data,
         }
-
     }
 
     #[inline]
@@ -248,7 +237,9 @@ impl<T> RcuCell<T> {
 
     pub fn try_lock(&self) -> Option<RcuGuard<T>> {
         if self.link.acquire() {
-            return Some(RcuGuard { link: self.link.clone() });
+            return Some(RcuGuard {
+                link: self.link.clone(),
+            });
         }
         None
     }
@@ -267,7 +258,7 @@ impl<T> RcuGuard<T> {
         let old_link = self.link.swap(data);
         if let Some(old) = old_link {
             old.add_ref();
-            let ptr = Shared::new(old as *const _ as *mut _).expect("null Shared");
+            let ptr = NonNull::new(old as *const _ as *mut _).expect("null Shared");
             let d = RcuReader::<T> { inner: ptr };
             d.unlink();
         }
