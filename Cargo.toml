@@ -11,7 +11,3 @@ version = "0.2.0"
 
 [badges]
 travis-ci = { repository = "Xudong-Huang/rcu_cell" }
-
-[features]
-default = ["std"]
-std = []

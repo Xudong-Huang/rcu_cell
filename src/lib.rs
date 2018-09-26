@@ -333,10 +333,8 @@ mod test {
     }
 
     #[test]
-    fn single_thread_arc() {
-        use std::sync::Arc;
-
-        let t = Arc::new(RcuCell::new(Some(10)));
+    fn single_thread_clone() {
+        let t = RcuCell::new(Some(10));
         let t1 = t.clone();
         assert!(t1.read().map(|v| *v) == Some(10));
         t1.try_lock().unwrap().update(Some(5));
