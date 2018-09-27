@@ -284,6 +284,12 @@ pub struct RcuCell<T> {
 unsafe impl<T> Send for RcuCell<T> {}
 unsafe impl<T> Sync for RcuCell<T> {}
 
+impl<T> Default for RcuCell<T> {
+    fn default() -> Self {
+        RcuCell::new(None)
+    }
+}
+
 impl<T> RcuCell<T> {
     pub fn new(data: Option<T>) -> Self {
         let ptr = match data {
@@ -329,6 +335,12 @@ impl<T> RcuCell<T> {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[test]
+    fn test_default() {
+        let x = RcuCell::<u32>::default();
+        assert_eq!(x.read().is_none(), true);
+    }
 
     #[test]
     fn simple_drop() {
