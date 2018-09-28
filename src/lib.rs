@@ -276,7 +276,7 @@ impl<T> Drop for RcuGuard<T> {
 //---------------------------------------------------------------------------------------
 // RcuCell
 //---------------------------------------------------------------------------------------
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct RcuCell<T> {
     link: Arc<LinkWrapper<T>>,
 }
@@ -287,6 +287,15 @@ unsafe impl<T> Sync for RcuCell<T> {}
 impl<T> Default for RcuCell<T> {
     fn default() -> Self {
         RcuCell::new(None)
+    }
+}
+
+impl<T> Clone for RcuCell<T> {
+    #[inline]
+    fn clone(&self) -> Self {
+        Self {
+            link: self.link.clone(),
+        }
     }
 }
 
