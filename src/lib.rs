@@ -197,6 +197,12 @@ impl<T> Deref for RcuReader<T> {
     }
 }
 
+impl<T> AsRef<T> for RcuReader<T> {
+    fn as_ref(&self) -> &T {
+        &**self
+    }
+}
+
 impl<T> Clone for RcuReader<T> {
     fn clone(&self) -> Self {
         unsafe {
