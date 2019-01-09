@@ -1,3 +1,4 @@
+use std::cmp;
 use std::fmt;
 use std::marker::PhantomData;
 use std::ops::Deref;
@@ -19,7 +20,7 @@ impl<T> RcuInner<T> {
     fn new(data: T) -> Self {
         RcuInner {
             refs: AtomicUsize::new(1),
-            data: data,
+            data,
         }
     }
 
@@ -153,7 +154,9 @@ impl<T> LinkWrapper<T> {
 
 impl<T> Drop for LinkWrapper<T> {
     fn drop(&mut self) {
-        self.get().map(|d| d.unlink());
+        if let Some(d) = self.get() {
+            d.unlink();
+        }
     }
 }
 
@@ -168,7 +171,6 @@ impl<T: fmt::Debug> fmt::Debug for LinkWrapper<T> {
 //---------------------------------------------------------------------------------------
 // RcuReader
 //---------------------------------------------------------------------------------------
-#[derive(Debug)]
 pub struct RcuReader<T> {
     inner: NonNull<RcuInner<T>>,
 }
@@ -212,6 +214,54 @@ impl<T> Clone for RcuReader<T> {
     }
 }
 
+impl<T: PartialEq> PartialEq for RcuReader<T> {
+    fn eq(&self, other: &RcuReader<T>) -> bool {
+        *(*self) == *(*other)
+    }
+}
+
+impl<T: PartialOrd> PartialOrd for RcuReader<T> {
+    fn partial_cmp(&self, other: &RcuReader<T>) -> Option<cmp::Ordering> {
+        (**self).partial_cmp(&**other)
+    }
+
+    fn lt(&self, other: &RcuReader<T>) -> bool {
+        *(*self) < *(*other)
+    }
+
+    fn le(&self, other: &RcuReader<T>) -> bool {
+        *(*self) <= *(*other)
+    }
+
+    fn gt(&self, other: &RcuReader<T>) -> bool {
+        *(*self) > *(*other)
+    }
+
+    fn ge(&self, other: &RcuReader<T>) -> bool {
+        *(*self) >= *(*other)
+    }
+}
+
+impl<T: Ord> Ord for RcuReader<T> {
+    fn cmp(&self, other: &RcuReader<T>) -> cmp::Ordering {
+        (**self).cmp(&**other)
+    }
+}
+
+impl<T: Eq> Eq for RcuReader<T> {}
+
+impl<T: fmt::Debug> fmt::Debug for RcuReader<T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Debug::fmt(&**self, f)
+    }
+}
+
+impl<T> fmt::Pointer for RcuReader<T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Pointer::fmt(&(&**self as *const T), f)
+    }
+}
+
 impl<T> RcuReader<T> {
     #[inline]
     fn unlink(&self) {
@@ -224,7 +274,6 @@ impl<T> RcuReader<T> {
 //---------------------------------------------------------------------------------------
 // RcuGuard
 //---------------------------------------------------------------------------------------
-#[derive(Debug)]
 pub struct RcuGuard<T> {
     link: Arc<LinkWrapper<T>>,
 }
@@ -276,6 +325,12 @@ impl<T> RcuGuard<T> {
 impl<T> Drop for RcuGuard<T> {
     fn drop(&mut self) {
         self.link.release();
+    }
+}
+
+impl<T: fmt::Debug> fmt::Debug for RcuGuard<T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Debug::fmt(&self.as_ref(), f)
     }
 }
 
@@ -444,5 +499,22 @@ mod test {
         t3.try_lock().unwrap().update(Some(13));
         drop(t3);
         assert_eq!(t.read().map(|v| *v), Some(13));
+    }
+
+    #[test]
+    fn test_rcu_reader() {
+        let t = RcuCell::new(Some(10));
+        let t1 = t.clone();
+        let t2 = t.clone();
+        let t3 = t.clone();
+        let d1 = t1.read().unwrap();
+        let d3 = t3.read().unwrap();
+        let mut g = t1.try_lock().unwrap();
+        g.update(Some(11));
+        drop(g);
+        let d2 = t2.read().unwrap();
+        assert_ne!(d1, d2);
+        assert_eq!(d1, d3);
+        assert_ne!(d2, d3);
     }
 }
