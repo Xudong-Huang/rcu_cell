@@ -3,7 +3,7 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::ops::Deref;
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{self, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 //---------------------------------------------------------------------------------------
@@ -26,12 +26,12 @@ impl<T> RcuInner<T> {
 
     #[inline]
     fn inc_ref(&self) {
-        self.refs.fetch_add(1, Ordering::Relaxed);
+        self.refs.fetch_add(1, Ordering::Release);
     }
 
     #[inline]
     fn dec_ref(&self) -> usize {
-        let ret = self.refs.fetch_sub(1, Ordering::Relaxed);
+        let ret = self.refs.fetch_sub(1, Ordering::Release);
         ret - 1
     }
 }
@@ -111,7 +111,7 @@ impl<T> LinkWrapper<T> {
             match self
                 .0
                 .ptr
-                .compare_exchange(old, new, Ordering::AcqRel, Ordering::Relaxed)
+                .compare_exchange(old, new, Ordering::AcqRel, Ordering::Acquire)
             {
                 Ok(_) => break,
                 Err(x) => old = x,
@@ -133,7 +133,7 @@ impl<T> LinkWrapper<T> {
             match self
                 .0
                 .ptr
-                .compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Relaxed)
+                .compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Acquire)
             {
                 // successfully reserved
                 Ok(_) => return true,
@@ -183,6 +183,7 @@ impl<T> Drop for RcuReader<T> {
     fn drop(&mut self) {
         unsafe {
             if self.inner.as_ref().dec_ref() == 0 {
+                atomic::fence(Ordering::Acquire);
                 // drop the inner box
                 let _: Box<RcuInner<T>> = Box::from_raw(self.inner.as_ptr());
             }
@@ -302,7 +303,7 @@ impl<T> RcuGuard<T> {
     // pub unsafe fn as_mut(&mut self) -> Option<&mut T> {
     //     // since it's locked and it's safe to update the data
     //     // ignore the reserve bit
-    //     let ptr = self.link.ptr.load(Ordering::Relaxed) & !1;
+    //     let ptr = self.link.ptr.load(Ordering::Acquire) & !1;
     //     if ptr == 0 {
     //         return None;
     //     }
@@ -313,7 +314,7 @@ impl<T> RcuGuard<T> {
     pub fn as_ref(&self) -> Option<&T> {
         // it's safe the get the ref since locked
         // ignore the reserve bit
-        let ptr = self.link.0.ptr.load(Ordering::Relaxed) & !1;
+        let ptr = self.link.0.ptr.load(Ordering::Acquire) & !1;
         if ptr == 0 {
             return None;
         }
