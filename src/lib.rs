@@ -25,14 +25,13 @@ impl<T> RcuInner<T> {
     }
 
     #[inline]
-    fn inc_ref(&self) {
-        self.refs.fetch_add(1, Ordering::Release);
+    fn inc_ref(&self) -> usize {
+        self.refs.fetch_add(1, Ordering::Release)
     }
 
     #[inline]
     fn dec_ref(&self) -> usize {
-        let ret = self.refs.fetch_sub(1, Ordering::Release);
-        ret - 1
+        self.refs.fetch_sub(1, Ordering::Release) - 1
     }
 }
 
@@ -77,13 +76,21 @@ impl<T> LinkWrapper<T> {
 
     #[inline]
     fn get(&self) -> Option<RcuReader<T>> {
-        let ptr = self.0.ptr.load(Ordering::Acquire);
-        self._conv(ptr).map(|ptr| {
-            ptr.inc_ref();
-            RcuReader {
-                inner: NonNull::new(ptr as *const _ as *mut _).expect("null shared"),
+        loop {
+            let ptr = self.0.ptr.load(Ordering::Acquire);
+            match self._conv(ptr) {
+                None => return None,
+                Some(p) => {
+                    // the old data is drop we should re-read the data again!
+                    if p.inc_ref() == 0 {
+                        continue;
+                    }
+                    return Some(RcuReader {
+                        inner: NonNull::new(p as *const _ as *mut _).expect("null shared"),
+                    });
+                }
             }
-        })
+        }
     }
 
     #[inline]
@@ -209,7 +216,8 @@ impl<T> AsRef<T> for RcuReader<T> {
 impl<T> Clone for RcuReader<T> {
     fn clone(&self) -> Self {
         unsafe {
-            self.inner.as_ref().inc_ref();
+            let cnt = self.inner.as_ref().inc_ref();
+            assert!(cnt > 0);
         }
         RcuReader { inner: self.inner }
     }
@@ -289,7 +297,8 @@ impl<T> RcuGuard<T> {
         // the RcuCell is acquired now
         let old_link = self.link.swap(data);
         if let Some(old) = old_link {
-            old.inc_ref();
+            let cnt = old.inc_ref();
+            assert!(cnt > 0);
             let ptr = NonNull::new(old as *const _ as *mut _).expect("null Shared");
             let d = RcuReader::<T> { inner: ptr };
             d.unlink();
