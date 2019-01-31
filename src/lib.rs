@@ -154,8 +154,7 @@ impl<T> LinkWrapper<T> {
 
     // release only happened after acquire
     fn release(&self) {
-        let ptr = self.0.ptr.load(Ordering::Acquire) & !1;
-        self.0.ptr.store(ptr, Ordering::Release);
+        self.0.ptr.fetch_and(!1, Ordering::Release);
     }
 }
 
