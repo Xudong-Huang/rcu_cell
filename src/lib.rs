@@ -4,7 +4,6 @@ use std::marker::PhantomData;
 use std::ops::Deref;
 use std::ptr::NonNull;
 use std::sync::atomic::{self, AtomicUsize, Ordering};
-use std::sync::Arc;
 
 //---------------------------------------------------------------------------------------
 // RcuInner
@@ -282,14 +281,14 @@ impl<T> RcuReader<T> {
 //---------------------------------------------------------------------------------------
 // RcuGuard
 //---------------------------------------------------------------------------------------
-pub struct RcuGuard<T> {
-    link: Arc<LinkWrapper<T>>,
+pub struct RcuGuard<'a, T: 'a> {
+    link: &'a LinkWrapper<T>,
 }
 
-unsafe impl<T: Send> Send for RcuGuard<T> {}
-unsafe impl<T: Sync> Sync for RcuGuard<T> {}
+// unsafe impl<'a, T> !Send for RcuGuard<'a, T> {}
+unsafe impl<'a, T: Sync> Sync for RcuGuard<'a, T> {}
 
-impl<T> RcuGuard<T> {
+impl<'a, T> RcuGuard<'a, T> {
     // update the RcuCell with a new value
     // this would not change the value that hold by readers
     pub fn update(&mut self, data: Option<T>) {
@@ -331,13 +330,13 @@ impl<T> RcuGuard<T> {
     }
 }
 
-impl<T> Drop for RcuGuard<T> {
+impl<'a, T> Drop for RcuGuard<'a, T> {
     fn drop(&mut self) {
         self.link.release();
     }
 }
 
-impl<T: fmt::Debug> fmt::Debug for RcuGuard<T> {
+impl<'a, T: fmt::Debug> fmt::Debug for RcuGuard<'a, T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Debug::fmt(&self.as_ref(), f)
     }
@@ -348,7 +347,7 @@ impl<T: fmt::Debug> fmt::Debug for RcuGuard<T> {
 //---------------------------------------------------------------------------------------
 #[derive(Debug)]
 pub struct RcuCell<T> {
-    link: Arc<LinkWrapper<T>>,
+    link: LinkWrapper<T>,
 }
 
 unsafe impl<T> Send for RcuCell<T> {}
@@ -357,15 +356,6 @@ unsafe impl<T> Sync for RcuCell<T> {}
 impl<T> Default for RcuCell<T> {
     fn default() -> Self {
         RcuCell::new(None)
-    }
-}
-
-impl<T> Clone for RcuCell<T> {
-    #[inline]
-    fn clone(&self) -> Self {
-        Self {
-            link: self.link.clone(),
-        }
     }
 }
 
@@ -380,10 +370,10 @@ impl<T> RcuCell<T> {
         };
 
         RcuCell {
-            link: Arc::new(LinkWrapper(Link {
+            link: LinkWrapper(Link {
                 ptr: AtomicUsize::new(ptr),
                 phantom: PhantomData,
-            })),
+            }),
         }
     }
 
@@ -403,9 +393,7 @@ impl<T> RcuCell<T> {
 
     pub fn try_lock(&self) -> Option<RcuGuard<T>> {
         if self.link.acquire() {
-            return Some(RcuGuard {
-                link: self.link.clone(),
-            });
+            return Some(RcuGuard { link: &self.link });
         }
         None
     }
@@ -414,6 +402,7 @@ impl<T> RcuCell<T> {
 #[cfg(test)]
 mod test {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn test_default() {
@@ -443,7 +432,7 @@ mod test {
 
     #[test]
     fn single_thread_clone() {
-        let t = RcuCell::new(Some(10));
+        let t = Arc::new(RcuCell::new(Some(10)));
         let t1 = t.clone();
         assert!(t1.read().map(|v| *v) == Some(10));
         t1.try_lock().unwrap().update(Some(5));
@@ -495,7 +484,7 @@ mod test {
 
     #[test]
     fn test_clone_rcu_cell() {
-        let t = RcuCell::new(Some(10));
+        let t = Arc::new(RcuCell::new(Some(10)));
         let t1 = t.clone();
         let t2 = t.clone();
         let t3 = t.clone();
@@ -512,7 +501,7 @@ mod test {
 
     #[test]
     fn test_rcu_reader() {
-        let t = RcuCell::new(Some(10));
+        let t = Arc::new(RcuCell::new(Some(10)));
         let t1 = t.clone();
         let t2 = t.clone();
         let t3 = t.clone();
