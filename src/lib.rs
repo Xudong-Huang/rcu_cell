@@ -372,8 +372,8 @@ pub struct RcuCell<T> {
     link: LinkWrapper<T>,
 }
 
-unsafe impl<T> Send for RcuCell<T> {}
-unsafe impl<T> Sync for RcuCell<T> {}
+unsafe impl<T: Send> Send for RcuCell<T> {}
+unsafe impl<T: Sync> Sync for RcuCell<T> {}
 
 impl<T> Default for RcuCell<T> {
     fn default() -> Self {
