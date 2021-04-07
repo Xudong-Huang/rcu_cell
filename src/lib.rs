@@ -1,9 +1,13 @@
-use std::cmp;
-use std::fmt;
-use std::marker::PhantomData;
-use std::ops::Deref;
-use std::ptr::NonNull;
-use std::sync::atomic::{self, AtomicUsize, Ordering};
+#![no_std]
+extern crate alloc;
+
+use alloc::boxed::Box;
+use core::cmp;
+use core::fmt;
+use core::marker::PhantomData;
+use core::ops::Deref;
+use core::ptr::NonNull;
+use core::sync::atomic::{self, AtomicUsize, Ordering};
 
 //---------------------------------------------------------------------------------------
 // RcuInner
@@ -114,7 +118,7 @@ impl<T> LinkWrapper<T> {
                 Ok(_) => break,
                 Err(x) => {
                     old = x & !2;
-                    atomic::spin_loop_hint()
+                    core::hint::spin_loop();
                 }
             }
         }
@@ -168,7 +172,7 @@ impl<T> LinkWrapper<T> {
                 // otherwise the link is reserved by others, just spin wait
                 Err(x) => {
                     old = x & !2;
-                    atomic::spin_loop_hint();
+                    core::hint::spin_loop();
                 }
             }
         }
@@ -424,7 +428,7 @@ impl<T> RcuCell<T> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use std::sync::Arc;
+    use alloc::sync::Arc;
 
     #[test]
     fn test_default() {
