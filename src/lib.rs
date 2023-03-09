@@ -233,7 +233,7 @@ impl<T> Deref for RcuReader<T> {
 
 impl<T> AsRef<T> for RcuReader<T> {
     fn as_ref(&self) -> &T {
-        &**self
+        self
     }
 }
 
@@ -386,6 +386,29 @@ impl<T> Default for RcuCell<T> {
 }
 
 impl<T> RcuCell<T> {
+    /// create an empty instance
+    pub const fn none() -> Self {
+        RcuCell {
+            link: LinkWrapper(Link {
+                ptr: AtomicUsize::new(0),
+                phantom: PhantomData,
+            }),
+        }
+    }
+
+    /// create from a value
+    pub fn some(data: T) -> Self {
+        let data = Box::new(RcuInner::new(data));
+        let ptr = Box::into_raw(data) as usize;
+        RcuCell {
+            link: LinkWrapper(Link {
+                ptr: AtomicUsize::new(ptr),
+                phantom: PhantomData,
+            }),
+        }
+    }
+
+    /// create from an option
     pub fn new(data: Option<T>) -> Self {
         let ptr = match data {
             Some(data) => {
