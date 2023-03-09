@@ -1,6 +1,6 @@
 [package]
 name = "rcu_cell"
-version = "0.1.10"
+version = "0.1.11"
 description = "a lockless rcu cell implementation"
 authors = ["Xudong Huang <huangxu008@hotmail.com>"]
 categories = ["concurrency", "data-structures", "no-std"]
