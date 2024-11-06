@@ -216,7 +216,9 @@ impl<T> Drop for RcuReader<T> {
             if self.inner.as_ref().dec_ref() == 0 {
                 atomic::fence(Ordering::Acquire);
                 // drop the inner box
-                let _: Box<RcuInner<T>> = Box::from_raw(self.inner.as_ptr());
+                let ptr = self.inner.as_ptr();
+                assert!(ptr as usize & 3 == 0);
+                let _ = Box::<RcuInner<T>>::from_raw(ptr);
             }
         }
     }
@@ -312,9 +314,9 @@ pub struct RcuGuard<'a, T: 'a> {
 }
 
 // unsafe impl<'a, T> !Send for RcuGuard<'a, T> {}
-unsafe impl<'a, T: Sync> Sync for RcuGuard<'a, T> {}
+unsafe impl<T: Sync> Sync for RcuGuard<'_, T> {}
 
-impl<'a, T> RcuGuard<'a, T> {
+impl<T> RcuGuard<'_, T> {
     // update the RcuCell with a new value
     // this would not change the value that hold by readers
     pub fn update(&mut self, data: Option<T>) {
@@ -356,13 +358,13 @@ impl<'a, T> RcuGuard<'a, T> {
     }
 }
 
-impl<'a, T> Drop for RcuGuard<'a, T> {
+impl<T> Drop for RcuGuard<'_, T> {
     fn drop(&mut self) {
         self.link.release();
     }
 }
 
-impl<'a, T: fmt::Debug> fmt::Debug for RcuGuard<'a, T> {
+impl<T: fmt::Debug> fmt::Debug for RcuGuard<'_, T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Debug::fmt(&self.as_ref(), f)
     }
@@ -456,7 +458,7 @@ mod test {
     #[test]
     fn test_default() {
         let x = RcuCell::<u32>::default();
-        assert_eq!(x.read().is_none(), true);
+        assert!(x.read().is_none());
     }
 
     #[test]
@@ -495,7 +497,7 @@ mod test {
         let mut g = t.try_lock().unwrap();
         let y = x.map(|v| v + 1);
         g.update(y);
-        assert_eq!(t.try_lock().is_none(), true);
+        assert!(t.try_lock().is_none());
         drop(g);
         assert_eq!(t.read().map(|v| *v), Some(11));
     }
@@ -503,20 +505,20 @@ mod test {
     #[test]
     fn test_is_none() {
         let t = RcuCell::new(Some(10));
-        assert_eq!(t.is_none(), false);
+        assert!(!t.is_none());
         t.try_lock().unwrap().update(None);
-        assert_eq!(t.is_none(), true);
+        assert!(t.is_none());
     }
 
     #[test]
     fn test_is_locked() {
         let t = RcuCell::new(Some(10));
-        assert_eq!(t.is_locked(), false);
+        assert!(!t.is_locked());
         let mut g = t.try_lock().unwrap();
         g.update(None);
-        assert_eq!(t.is_locked(), true);
+        assert!(t.is_locked());
         drop(g);
-        assert_eq!(t.is_locked(), false);
+        assert!(!t.is_locked());
     }
 
     // #[test]
