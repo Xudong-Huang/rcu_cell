@@ -203,12 +203,10 @@ unsafe impl<T: Sync> Sync for RcuReader<T> {}
 impl<T> Drop for RcuReader<T> {
     #[inline]
     fn drop(&mut self) {
-        unsafe {
-            if self.unlink() == 0 {
-                core::sync::atomic::fence(Ordering::Acquire);
-                // drop the inner box
-                let _ = Box::<RcuInner<T>>::from_raw(self.inner.as_ptr());
-            }
+        if self.unlink() == 0 {
+            core::sync::atomic::fence(Ordering::Acquire);
+            // drop the inner box
+            let _ = unsafe { Box::<RcuInner<T>>::from_raw(self.inner.as_ptr()) };
         }
     }
 }
@@ -331,14 +329,11 @@ impl<T> RcuGuard<'_, T> {
     // }
 
     pub fn as_ref(&self) -> Option<&T> {
-        // it's safe the get the ref since locked
+        // it's safe to get the ref since locked
         // ignore the reserve bit
-        let ptr = self.link.0.ptr.load(Ordering::Acquire) & !3;
-        if ptr == 0 {
-            return None;
-        }
-        let inner = unsafe { &*(ptr as *const RcuInner<T>) };
-        Some(&inner.data)
+        let ptr = self.link.0.ptr.load(Ordering::Acquire);
+        let link = LinkWrapper::<T>::conv(ptr);
+        link.map(|p| unsafe { &p.as_ref().data })
     }
 }
 
@@ -427,10 +422,7 @@ impl<T> RcuCell<T> {
     }
 
     pub fn try_lock(&self) -> Option<RcuGuard<T>> {
-        if self.link.acquire() {
-            return Some(RcuGuard { link: &self.link });
-        }
-        None
+        self.link.acquire().then(|| RcuGuard { link: &self.link })
     }
 }
 
@@ -523,18 +515,6 @@ mod test {
         drop(g);
         assert!(!t.is_locked());
     }
-
-    // #[test]
-    // fn test_as_mut() {
-    //     let t = RcuCell::new(Some(10));
-    //     let mut g = t.try_lock().unwrap();
-    //     assert_eq!(g.as_ref(), Some(&10));
-    //     // change the internal data with lock
-    //     g.as_mut().map(|d| *d = 20);
-    //     drop(g);
-    //     let x = t.read().unwrap();
-    //     assert_eq!(*x, 20);
-    // }
 
     #[test]
     fn test_clone_rcu_cell() {
