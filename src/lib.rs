@@ -2,12 +2,11 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
-use core::cmp;
-use core::fmt;
 use core::marker::PhantomData;
 use core::ops::Deref;
 use core::ptr::NonNull;
-use core::sync::atomic::{self, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicUsize, Ordering};
+use core::{cmp, fmt};
 
 //---------------------------------------------------------------------------------------
 // RcuInner
@@ -44,31 +43,25 @@ impl<T> RcuInner<T> {
 
 struct Link<T> {
     ptr: AtomicUsize,
-    phantom: PhantomData<*mut T>,
+    phantom: PhantomData<*const T>,
 }
 
 struct LinkWrapper<T>(Link<RcuInner<T>>);
 
 impl<T> LinkWrapper<T> {
-    // convert from usize to ref
+    // convert from usize to ptr
     #[inline]
-    fn _conv(&self, ptr: usize) -> Option<&RcuInner<T>> {
+    fn conv(ptr: usize) -> Option<NonNull<RcuInner<T>>> {
         // ignore the reserve bit and read bit
         let ptr = ptr & !3;
-        if ptr == 0 {
-            return None;
-        }
-        Some(unsafe { &*(ptr as *const RcuInner<T>) })
+        NonNull::new(ptr as *mut RcuInner<T>)
     }
 
     #[inline]
     fn is_none(&self) -> bool {
         let ptr = self.0.ptr.load(Ordering::Acquire);
         let ptr = ptr & !3;
-        if ptr == 0 {
-            return true;
-        }
-        false
+        ptr == 0
     }
 
     #[inline]
@@ -81,12 +74,10 @@ impl<T> LinkWrapper<T> {
     fn get(&self) -> Option<RcuReader<T>> {
         let ptr = self.read_lock();
 
-        let ret = self._conv(ptr).map(|p| {
+        let ret = Self::conv(ptr).map(|p| {
             // we are sure that the data is still in memroy with the read lock
-            p.inc_ref();
-            RcuReader {
-                inner: NonNull::new(p as *const _ as *mut _).expect("null shared"),
-            }
+            unsafe { p.as_ref().inc_ref() };
+            RcuReader { inner: p }
         });
 
         self.read_unlock();
@@ -94,7 +85,7 @@ impl<T> LinkWrapper<T> {
     }
 
     #[inline]
-    fn swap(&self, data: Option<T>) -> Option<&RcuInner<T>> {
+    fn swap(&self, data: Option<T>) -> Option<NonNull<RcuInner<T>>> {
         // we can sure that the update is
         // only possible after get the guard
         // in which case the reserve bit must be set
@@ -123,7 +114,7 @@ impl<T> LinkWrapper<T> {
             }
         }
 
-        self._conv(old)
+        Self::conv(old)
     }
 
     // only one thread can acquire the link successfully
@@ -194,7 +185,7 @@ impl<T> Drop for LinkWrapper<T> {
 impl<T: fmt::Debug> fmt::Debug for LinkWrapper<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let ptr = self.0.ptr.load(Ordering::Acquire);
-        let inner = self._conv(ptr);
+        let inner = Self::conv(ptr);
         f.debug_struct("Link").field("inner", &inner).finish()
     }
 }
@@ -213,12 +204,10 @@ impl<T> Drop for RcuReader<T> {
     #[inline]
     fn drop(&mut self) {
         unsafe {
-            if self.inner.as_ref().dec_ref() == 0 {
-                atomic::fence(Ordering::Acquire);
+            if self.unlink() == 0 {
+                core::sync::atomic::fence(Ordering::Acquire);
                 // drop the inner box
-                let ptr = self.inner.as_ptr();
-                assert!(ptr as usize & 3 == 0);
-                let _ = Box::<RcuInner<T>>::from_raw(ptr);
+                let _ = Box::<RcuInner<T>>::from_raw(self.inner.as_ptr());
             }
         }
     }
@@ -235,16 +224,14 @@ impl<T> Deref for RcuReader<T> {
 
 impl<T> AsRef<T> for RcuReader<T> {
     fn as_ref(&self) -> &T {
-        self
+        self.deref()
     }
 }
 
 impl<T> Clone for RcuReader<T> {
     fn clone(&self) -> Self {
-        unsafe {
-            let cnt = self.inner.as_ref().inc_ref();
-            assert!(cnt > 0);
-        }
+        let cnt = unsafe { self.inner.as_ref().inc_ref() };
+        assert!(cnt > 0);
         RcuReader { inner: self.inner }
     }
 }
@@ -299,10 +286,8 @@ impl<T> fmt::Pointer for RcuReader<T> {
 
 impl<T> RcuReader<T> {
     #[inline]
-    fn unlink(&self) {
-        unsafe {
-            self.inner.as_ref().dec_ref();
-        }
+    fn unlink(&self) -> usize {
+        unsafe { self.inner.as_ref().dec_ref() }
     }
 }
 
@@ -323,10 +308,9 @@ impl<T> RcuGuard<'_, T> {
         // the RcuCell is acquired now
         let old_link = self.link.swap(data);
         if let Some(old) = old_link {
-            let cnt = old.inc_ref();
+            let cnt = unsafe { old.as_ref().inc_ref() };
             assert!(cnt > 0);
-            let ptr = NonNull::new(old as *const _ as *mut _).expect("null Shared");
-            let d = RcuReader::<T> { inner: ptr };
+            let d = RcuReader::<T> { inner: old };
             d.unlink();
         }
     }
@@ -463,7 +447,26 @@ mod test {
 
     #[test]
     fn simple_drop() {
-        let _ = RcuCell::new(Some(10));
+        static REF: AtomicUsize = AtomicUsize::new(0);
+        struct Foo(usize);
+        impl Foo {
+            fn new(data: usize) -> Self {
+                REF.fetch_add(data, Ordering::Relaxed);
+                Foo(data)
+            }
+        }
+        impl Drop for Foo {
+            fn drop(&mut self) {
+                REF.fetch_sub(self.0, Ordering::Relaxed);
+            }
+        }
+        let a = RcuCell::new(Some(Foo::new(10)));
+        let b = a.read().unwrap();
+        assert_eq!(REF.load(Ordering::Relaxed), 10);
+        drop(b);
+        assert_eq!(REF.load(Ordering::Relaxed), 10);
+        drop(a);
+        assert_eq!(REF.load(Ordering::Relaxed), 0);
     }
 
     #[test]
