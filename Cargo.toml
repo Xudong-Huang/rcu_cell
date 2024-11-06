@@ -11,13 +11,4 @@ homepage = "https://github.com/Xudong-Huang/rcu_cell"
 documentation = "https://docs.rs/rcu_cell"
 license = "LGPL-3.0"
 readme = "./README.md"
-exclude = [
-    ".gitignore",
-    ".travis.yml",
-    "appveyor.yml",
-    "benches/**/*",
-    "docs/**/*",
-]
-
-[badges]
-travis-ci = { repository = "Xudong-Huang/rcu_cell" }
+exclude = [".gitignore"]

@@ -1,11 +1,10 @@
-[![Build Status](https://travis-ci.org/Xudong-Huang/rcu_cell.svg?branch=master)](https://travis-ci.org/Xudong-Huang/rcu_cell)
+[![Build Status](https://github.com/Xudong-Huang/rcu_cell/workflows/CI/badge.svg)](https://github.com/Xudong-Huang/rcu_cell/actions?query=workflow%3ACI+branch%3Amaster)
 [![Current Crates.io Version](https://img.shields.io/crates/v/rcu_cell.svg)](https://crates.io/crates/rcu_cell)
 [![Document](https://img.shields.io/badge/doc-rcu_cell-green.svg)](https://docs.rs/rcu_cell)
 
 # RcuCell
 
-A lockless rcu cell implementation that can be used safely in
-multithread context.
+A lockless rcu cell implementation that can be used safely in multithread context.
 
 ## Features
 
@@ -31,4 +30,3 @@ multithread context.
         assert_eq!(a.map(|v| *v), None);
     }
 ```
-
