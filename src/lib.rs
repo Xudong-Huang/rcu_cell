@@ -65,12 +65,6 @@ impl<T> LinkWrapper<T> {
     }
 
     #[inline]
-    fn is_locked(&self) -> bool {
-        let ptr = self.0.ptr.load(Ordering::Acquire);
-        ptr & 1 == 1
-    }
-
-    #[inline]
     fn get(&self) -> Option<RcuReader<T>> {
         let ptr = self.read_lock();
 
@@ -206,7 +200,7 @@ impl<T> Drop for RcuReader<T> {
         if self.unlink() == 0 {
             core::sync::atomic::fence(Ordering::Acquire);
             // drop the inner box
-            let _ = unsafe { Box::<RcuInner<T>>::from_raw(self.inner.as_ptr()) };
+            let _ = unsafe { Box::from_raw(self.inner.as_ptr()) };
         }
     }
 }
@@ -305,11 +299,9 @@ impl<T> RcuGuard<'_, T> {
     pub fn update(&mut self, data: Option<T>) {
         // the RcuCell is acquired now
         let old_link = self.link.swap(data);
-        if let Some(old) = old_link {
-            let cnt = unsafe { old.as_ref().inc_ref() };
-            assert!(cnt > 0);
-            let d = RcuReader::<T> { inner: old };
-            d.unlink();
+        if let Some(inner) = old_link {
+            // drop the old value as a RcuReader
+            drop(RcuReader::<T> { inner });
         }
     }
 
@@ -412,11 +404,6 @@ impl<T> RcuCell<T> {
         self.link.is_none()
     }
 
-    #[inline]
-    pub fn is_locked(&self) -> bool {
-        self.link.is_locked()
-    }
-
     pub fn read(&self) -> Option<RcuReader<T>> {
         self.link.get()
     }
@@ -503,17 +490,6 @@ mod test {
         assert!(!t.is_none());
         t.try_lock().unwrap().update(None);
         assert!(t.is_none());
-    }
-
-    #[test]
-    fn test_is_locked() {
-        let t = RcuCell::new(Some(10));
-        assert!(!t.is_locked());
-        let mut g = t.try_lock().unwrap();
-        g.update(None);
-        assert!(t.is_locked());
-        drop(g);
-        assert!(!t.is_locked());
     }
 
     #[test]
