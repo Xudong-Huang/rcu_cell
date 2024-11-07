@@ -48,6 +48,14 @@ struct Link<T> {
 
 struct LinkWrapper<T>(Link<RcuInner<T>>);
 
+impl<T> Deref for LinkWrapper<T> {
+    type Target = AtomicUsize;
+
+    fn deref(&self) -> &AtomicUsize {
+        &self.0.ptr
+    }
+}
+
 impl<T> LinkWrapper<T> {
     // convert from usize to ptr
     #[inline]
@@ -59,19 +67,17 @@ impl<T> LinkWrapper<T> {
 
     #[inline]
     fn is_none(&self) -> bool {
-        let ptr = self.0.ptr.load(Ordering::Acquire);
-        let ptr = ptr & !3;
-        ptr == 0
+        self.load(Ordering::Acquire) & !3 == 0
     }
 
     #[inline]
     fn get(&self) -> Option<RcuReader<T>> {
         let ptr = self.read_lock();
 
-        let ret = Self::conv(ptr).map(|p| {
+        let ret = Self::conv(ptr).map(|inner| {
             // we are sure that the data is still in memroy with the read lock
-            unsafe { p.as_ref().inc_ref() };
-            RcuReader { inner: p }
+            unsafe { inner.as_ref().inc_ref() };
+            RcuReader { inner }
         });
 
         self.read_unlock();
@@ -92,14 +98,10 @@ impl<T> LinkWrapper<T> {
         };
 
         // should wait until there is no read for the ptr
-        let mut old = self.0.ptr.load(Ordering::Acquire) & !2;
+        let mut old = self.load(Ordering::Acquire) & !2;
 
         loop {
-            match self
-                .0
-                .ptr
-                .compare_exchange(old, new, Ordering::AcqRel, Ordering::Acquire)
-            {
+            match self.compare_exchange(old, new, Ordering::AcqRel, Ordering::Acquire) {
                 Ok(_) => break,
                 Err(x) => {
                     old = x & !2;
@@ -113,18 +115,14 @@ impl<T> LinkWrapper<T> {
 
     // only one thread can acquire the link successfully
     fn acquire(&self) -> bool {
-        let mut old = self.0.ptr.load(Ordering::Acquire);
+        let mut old = self.load(Ordering::Acquire);
         if old & 1 != 0 {
             return false;
         }
 
         loop {
             let new = old | 1;
-            match self
-                .0
-                .ptr
-                .compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Acquire)
-            {
+            match self.compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Acquire) {
                 // successfully reserved
                 Ok(_) => return true,
                 // only try again if old value is still false
@@ -137,13 +135,13 @@ impl<T> LinkWrapper<T> {
 
     // release only happened after acquire
     fn release(&self) {
-        self.0.ptr.fetch_and(!1, Ordering::Release);
+        self.fetch_and(!1, Ordering::Release);
     }
 
     // only one thread can access the ptr when read/write
     // return the current value after read lock
     fn read_lock(&self) -> usize {
-        let mut old = self.0.ptr.load(Ordering::Acquire) & !2;
+        let mut old = self.load(Ordering::Acquire) & !2;
 
         loop {
             let new = old | 2;
@@ -164,21 +162,22 @@ impl<T> LinkWrapper<T> {
     }
 
     fn read_unlock(&self) {
-        self.0.ptr.fetch_and(!2, Ordering::Release);
+        self.fetch_and(!2, Ordering::Release);
     }
 }
 
 impl<T> Drop for LinkWrapper<T> {
     fn drop(&mut self) {
-        if let Some(d) = self.get() {
-            d.unlink();
+        let ptr = self.load(Ordering::Acquire);
+        if let Some(inner) = Self::conv(ptr) {
+            drop(RcuReader { inner })
         }
     }
 }
 
 impl<T: fmt::Debug> fmt::Debug for LinkWrapper<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let ptr = self.0.ptr.load(Ordering::Acquire);
+        let ptr = self.load(Ordering::Acquire);
         let inner = Self::conv(ptr);
         f.debug_struct("Link").field("inner", &inner).finish()
     }
@@ -197,10 +196,11 @@ unsafe impl<T: Sync> Sync for RcuReader<T> {}
 impl<T> Drop for RcuReader<T> {
     #[inline]
     fn drop(&mut self) {
-        if self.unlink() == 0 {
+        let inner = unsafe { self.inner.as_mut() };
+        if inner.dec_ref() == 0 {
             core::sync::atomic::fence(Ordering::Acquire);
             // drop the inner box
-            let _ = unsafe { Box::from_raw(self.inner.as_ptr()) };
+            let _ = unsafe { Box::from_raw(inner) };
         }
     }
 }
@@ -276,13 +276,6 @@ impl<T> fmt::Pointer for RcuReader<T> {
     }
 }
 
-impl<T> RcuReader<T> {
-    #[inline]
-    fn unlink(&self) -> usize {
-        unsafe { self.inner.as_ref().dec_ref() }
-    }
-}
-
 //---------------------------------------------------------------------------------------
 // RcuGuard
 //---------------------------------------------------------------------------------------
@@ -323,8 +316,8 @@ impl<T> RcuGuard<'_, T> {
     pub fn as_ref(&self) -> Option<&T> {
         // it's safe to get the ref since locked
         // ignore the reserve bit
-        let ptr = self.link.0.ptr.load(Ordering::Acquire);
-        let link = LinkWrapper::<T>::conv(ptr);
+        let ptr = self.link.load(Ordering::Acquire);
+        let link = LinkWrapper::conv(ptr);
         link.map(|p| unsafe { &p.as_ref().data })
     }
 }
