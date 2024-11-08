@@ -347,13 +347,38 @@ impl<T> RcuCell<T> {
         self.link.is_none()
     }
 
-    pub fn take(&self) -> Option<RcuReader<T>> {
+    fn inner_update(&self, data: Option<T>) -> Option<RcuReader<T>> {
+        let new = match data {
+            Some(v) => {
+                let data = Box::new(RcuInner::new(v));
+                Box::into_raw(data) as usize | 1
+            }
+            None => 1,
+        };
+
         let w_lock = self.ptr_lock.write();
-        let ptr = self.link.swap(1, Ordering::AcqRel);
+        let old = self.link.swap(new, Ordering::AcqRel);
         drop(w_lock);
 
-        let link = LinkWrapper::conv(ptr);
-        link.map(|inner| RcuReader { inner })
+        let old_link = LinkWrapper::conv(old);
+        old_link.map(|inner| RcuReader::<T> { inner })
+    }
+
+    pub fn take(&self) -> Option<RcuReader<T>> {
+        self.inner_update(None)
+    }
+
+    pub fn write(&self, data: T) -> Option<RcuReader<T>> {
+        self.inner_update(Some(data))
+    }
+
+    pub fn update<F>(&self, f: F) -> Option<RcuReader<T>>
+    where
+        F: FnOnce(&T) -> T,
+    {
+        let v = self.read();
+        let data = v.as_ref().map(|v| f(v));
+        self.inner_update(data)
     }
 
     pub fn read(&self) -> Option<RcuReader<T>> {
@@ -492,10 +517,13 @@ mod test {
     fn test_rcu_take() {
         let t = Arc::new(RcuCell::new(10));
         let t1 = t.clone();
-        let t3 = t.clone();
+        let t2 = t.clone();
         let d1 = t1.take().unwrap();
         assert_eq!(*d1, 10);
-        let d3 = t3.take();
-        assert!(d3.is_none());
+        assert_eq!(t1.read(), None);
+        let d2 = t2.write(42);
+        assert!(d2.is_none());
+        let d3 = t2.read().unwrap();
+        assert_eq!(*d3, 42);
     }
 }
