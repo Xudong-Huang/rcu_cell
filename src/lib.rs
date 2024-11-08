@@ -282,7 +282,8 @@ unsafe impl<T: Sync> Sync for RcuGuard<'_, T> {}
 impl<T> RcuGuard<'_, T> {
     // update the RcuCell with a new value
     // this would not change the value that hold by readers
-    pub fn update(&mut self, data: Option<T>) {
+    pub fn update(&mut self, data: impl Into<Option<T>>) {
+        let data = data.into();
         // the RcuCell is acquired now
         let old_link = self.link.swap(data);
         if let Some(inner) = old_link {
@@ -368,7 +369,8 @@ impl<T> RcuCell<T> {
     }
 
     /// create from an option
-    pub fn new(data: Option<T>) -> Self {
+    pub fn new(data: impl Into<Option<T>>) -> Self {
+        let data = data.into();
         let ptr = match data {
             Some(data) => {
                 let data = Box::new(RcuInner::new(data));
@@ -425,7 +427,7 @@ mod test {
                 REF.fetch_sub(self.0, Ordering::Relaxed);
             }
         }
-        let a = RcuCell::new(Some(Foo::new(10)));
+        let a = RcuCell::new(Foo::new(10));
         let b = a.read().unwrap();
         assert_eq!(REF.load(Ordering::Relaxed), 10);
         drop(b);
@@ -472,7 +474,7 @@ mod test {
 
     #[test]
     fn test_is_none() {
-        let t = RcuCell::new(Some(10));
+        let t = RcuCell::new(10);
         assert!(!t.is_none());
         t.try_lock().unwrap().update(None);
         assert!(t.is_none());
@@ -497,14 +499,14 @@ mod test {
 
     #[test]
     fn test_rcu_reader() {
-        let t = Arc::new(RcuCell::new(Some(10)));
+        let t = Arc::new(RcuCell::new(10));
         let t1 = t.clone();
         let t2 = t.clone();
         let t3 = t.clone();
         let d1 = t1.read().unwrap();
         let d3 = t3.read().unwrap();
         let mut g = t1.try_lock().unwrap();
-        g.update(Some(11));
+        g.update(11);
         drop(g);
         let d2 = t2.read().unwrap();
         assert_ne!(d1, d2);
