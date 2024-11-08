@@ -12,3 +12,6 @@ documentation = "https://docs.rs/rcu_cell"
 license = "LGPL-3.0"
 readme = "./README.md"
 exclude = [".gitignore", "benches/**"]
+
+[dependencies]
+parking_lot = "0.12"
