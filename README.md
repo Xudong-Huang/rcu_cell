@@ -8,25 +8,32 @@ A lockless rcu cell implementation that can be used safely in multithread contex
 
 ## Features
 
-- The write operation would not block the read operation.
-- The write operation would "block" the write operation.
+- Support multi-thread read and write operations.
+- The read operation would not block other read operation.
+- The read operation is something like Arc::clone
+- The write operation is something like Atomic Swap.
+- The write operation would block all read operations.
 - The RcuCell could contain no data
+- Could be compiled with no_std
 
 
 ## Usage
 
 ```rust
-   fn single_thread() {
-        let t = RcuCell::new(Some(10));
-        let x = t.read();
-        let y = t.read();
-        t.try_lock().unwrap().update(None);
-        let z = t.read();
-        let a = z.clone();
-        drop(t); // t can be dropped before reader
-        assert_eq!(x.map(|v| *v), Some(10));
-        assert_eq!(y.map(|v| *v), Some(10));
-        assert_eq!(z.map(|v| *v), None);
-        assert_eq!(a.map(|v| *v), None);
+    use rcu_cell::RcuCell;
+    use std::sync::Arc;
+
+    #[test]
+   fn test_rcu() {
+        let t = Arc::new(RcuCell::new(10));
+        let t1 = t.clone();
+        let t2 = t.clone();
+        let d1 = t1.take().unwrap();
+        assert_eq!(*d1, 10);
+        assert_eq!(t1.read(), None);
+        let d2 = t2.write(42);
+        assert!(d2.is_none());
+        let d3 = t2.read().unwrap();
+        assert_eq!(*d3, 42);
     }
 ```
