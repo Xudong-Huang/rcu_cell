@@ -4,11 +4,10 @@ extern crate alloc;
 use alloc::boxed::Box;
 use parking_lot::RwLock;
 
-use core::marker::PhantomData;
 use core::ops::Deref;
 use core::ptr::NonNull;
-use core::sync::atomic::{AtomicUsize, Ordering};
-use core::{cmp, fmt};
+use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+use core::{cmp, fmt, ptr};
 
 //---------------------------------------------------------------------------------------
 // RcuInner
@@ -43,37 +42,28 @@ impl<T> RcuInner<T> {
 // LinkWrapper
 //---------------------------------------------------------------------------------------
 struct LinkWrapper<T> {
-    ptr: AtomicUsize,
-    phantom: PhantomData<*const RcuInner<T>>,
+    ptr: AtomicPtr<RcuInner<T>>,
 }
 
 impl<T> Deref for LinkWrapper<T> {
-    type Target = AtomicUsize;
+    type Target = AtomicPtr<RcuInner<T>>;
 
-    fn deref(&self) -> &AtomicUsize {
+    fn deref(&self) -> &AtomicPtr<RcuInner<T>> {
         &self.ptr
     }
 }
 
 impl<T> LinkWrapper<T> {
-    // convert from usize to ptr
-    #[inline]
-    fn conv(ptr: usize) -> Option<NonNull<RcuInner<T>>> {
-        // ignore the reserve bit and read bit
-        let ptr = ptr & !3;
-        NonNull::new(ptr as *mut RcuInner<T>)
-    }
-
     #[inline]
     fn is_none(&self) -> bool {
-        self.load(Ordering::Acquire) & !3 == 0
+        self.load(Ordering::Acquire).is_null()
     }
 }
 
 impl<T> Drop for LinkWrapper<T> {
     fn drop(&mut self) {
         let ptr = self.load(Ordering::Acquire);
-        if let Some(inner) = Self::conv(ptr) {
+        if let Some(inner) = NonNull::new(ptr) {
             drop(RcuReader { inner })
         }
     }
@@ -82,7 +72,7 @@ impl<T> Drop for LinkWrapper<T> {
 impl<T: fmt::Debug> fmt::Debug for LinkWrapper<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let ptr = self.load(Ordering::Acquire);
-        let inner = Self::conv(ptr);
+        let inner = NonNull::new(ptr);
         f.debug_struct("Link").field("inner", &inner).finish()
     }
 }
@@ -203,8 +193,7 @@ impl<T> RcuCell<T> {
     pub const fn none() -> Self {
         RcuCell {
             link: LinkWrapper {
-                ptr: AtomicUsize::new(0),
-                phantom: PhantomData,
+                ptr: AtomicPtr::new(ptr::null_mut()),
             },
             ptr_lock: RwLock::new(()),
         }
@@ -213,11 +202,10 @@ impl<T> RcuCell<T> {
     /// create from a value
     pub fn some(data: T) -> Self {
         let data = Box::new(RcuInner::new(data));
-        let ptr = Box::into_raw(data) as usize;
+        let ptr = Box::into_raw(data);
         RcuCell {
             link: LinkWrapper {
-                ptr: AtomicUsize::new(ptr),
-                phantom: PhantomData,
+                ptr: AtomicPtr::new(ptr),
             },
             ptr_lock: RwLock::new(()),
         }
@@ -229,15 +217,14 @@ impl<T> RcuCell<T> {
         let ptr = match data {
             Some(data) => {
                 let data = Box::new(RcuInner::new(data));
-                Box::into_raw(data) as usize
+                Box::into_raw(data)
             }
-            None => 0,
+            None => ptr::null_mut(),
         };
 
         RcuCell {
             link: LinkWrapper {
-                ptr: AtomicUsize::new(ptr),
-                phantom: PhantomData,
+                ptr: AtomicPtr::new(ptr),
             },
             ptr_lock: RwLock::new(()),
         }
@@ -252,16 +239,16 @@ impl<T> RcuCell<T> {
         let new = match data {
             Some(v) => {
                 let data = Box::new(RcuInner::new(v));
-                Box::into_raw(data) as usize | 1
+                Box::into_raw(data)
             }
-            None => 1,
+            None => ptr::null_mut(),
         };
 
         let w_lock = self.ptr_lock.write();
         let old = self.link.swap(new, Ordering::AcqRel);
         drop(w_lock);
 
-        let old_link = LinkWrapper::conv(old);
+        let old_link = NonNull::new(old);
         old_link.map(|inner| RcuReader::<T> { inner })
     }
 
@@ -286,7 +273,7 @@ impl<T> RcuCell<T> {
         let r_lock = self.ptr_lock.read();
 
         let ptr = self.link.load(Ordering::Acquire);
-        let ret = LinkWrapper::conv(ptr).map(|inner| {
+        let ret = NonNull::new(ptr).map(|inner| {
             // we are sure that the data is still in memroy with the read lock
             unsafe { inner.as_ref().inc_ref() };
             RcuReader { inner }
