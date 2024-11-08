@@ -94,6 +94,8 @@ impl<T: fmt::Debug> fmt::Debug for LinkWrapper<T> {
 //---------------------------------------------------------------------------------------
 // RcuReader
 //---------------------------------------------------------------------------------------
+
+/// A reader of RCU cell, it behaves like `Arc<T>`
 pub struct RcuReader<T> {
     inner: NonNull<RcuInner<T>>,
 }
@@ -187,6 +189,8 @@ impl<T> fmt::Pointer for RcuReader<T> {
 //---------------------------------------------------------------------------------------
 // RcuCell
 //---------------------------------------------------------------------------------------
+
+/// A RCU cell, it behaves like `RwLock<Option<T>>`
 #[derive(Debug)]
 pub struct RcuCell<T> {
     link: LinkWrapper<T>,
@@ -238,6 +242,7 @@ impl<T> RcuCell<T> {
         }
     }
 
+    /// check if the rcu cell is empty
     #[inline]
     pub fn is_none(&self) -> bool {
         self.link.is_none()
@@ -260,14 +265,18 @@ impl<T> RcuCell<T> {
         old_link.map(|inner| RcuReader::<T> { inner })
     }
 
+    /// take the value from the rcu cell
     pub fn take(&self) -> Option<RcuReader<T>> {
         self.inner_update(None)
     }
 
+    /// write a value to the rcu cell and return the old value
     pub fn write(&self, data: T) -> Option<RcuReader<T>> {
         self.inner_update(Some(data))
     }
 
+    /// update the value with a closure in the rcu cell
+    /// and return the old value
     pub fn update<F>(&self, f: F) -> Option<RcuReader<T>>
     where
         F: FnOnce(&T) -> T,
@@ -277,6 +286,7 @@ impl<T> RcuCell<T> {
         self.inner_update(data)
     }
 
+    /// create a reader of the rcu cell
     pub fn read(&self) -> Option<RcuReader<T>> {
         let r_lock = self.ptr_lock.read();
 
