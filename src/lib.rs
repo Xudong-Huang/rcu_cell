@@ -282,6 +282,17 @@ unsafe impl<T: Sync> Sync for RcuGuard<'_, T> {}
 impl<T> RcuGuard<'_, T> {
     // update the RcuCell with a new value
     // this would not change the value that hold by readers
+    pub fn write(&mut self, data: T) {
+        // the RcuCell is acquired now
+        let old_link = self.link.swap(Some(data));
+        if let Some(inner) = old_link {
+            // drop the old value as a RcuReader
+            drop(RcuReader::<T> { inner });
+        }
+    }
+
+    // update the RcuCell with a new Option value
+    // this would not change the value that hold by readers
     pub fn update(&mut self, data: impl Into<Option<T>>) {
         let data = data.into();
         // the RcuCell is acquired now
@@ -456,7 +467,7 @@ mod test {
         let t = Arc::new(RcuCell::new(Some(10)));
         let t1 = t.clone();
         assert!(t1.read().map(|v| *v) == Some(10));
-        t1.try_lock().unwrap().update(Some(5));
+        t1.try_lock().unwrap().write(5);
         assert!(t.read().map(|v| *v) == Some(5));
     }
 
@@ -486,13 +497,13 @@ mod test {
         let t1 = t.clone();
         let t2 = t.clone();
         let t3 = t.clone();
-        t1.try_lock().unwrap().update(Some(11));
+        t1.try_lock().unwrap().write(11);
         drop(t1);
         assert_eq!(t.read().map(|v| *v), Some(11));
-        t2.try_lock().unwrap().update(Some(12));
+        t2.try_lock().unwrap().write(12);
         drop(t2);
         assert_eq!(t.read().map(|v| *v), Some(12));
-        t3.try_lock().unwrap().update(Some(13));
+        t3.try_lock().unwrap().write(13);
         drop(t3);
         assert_eq!(t.read().map(|v| *v), Some(13));
     }
