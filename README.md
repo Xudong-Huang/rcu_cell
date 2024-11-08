@@ -23,8 +23,7 @@ A lockless rcu cell implementation that can be used safely in multithread contex
     use rcu_cell::RcuCell;
     use std::sync::Arc;
 
-    #[test]
-   fn test_rcu() {
+    fn main() {
         let t = Arc::new(RcuCell::new(10));
         let t1 = t.clone();
         let t2 = t.clone();
