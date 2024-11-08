@@ -1,9 +1,9 @@
 #![no_std]
 extern crate alloc;
 
+use alloc::boxed::Box;
 use parking_lot::RwLock;
 
-use alloc::boxed::Box;
 use core::marker::PhantomData;
 use core::ops::Deref;
 use core::ptr::NonNull;
@@ -224,7 +224,7 @@ impl<T> RcuGuard<'_, T> {
 
     // update the RcuCell with a new Option value
     // this would not change the value that hold by readers
-    pub fn update(&mut self, data: impl Into<Option<T>>) {
+    pub fn update(&mut self, data: impl Into<Option<T>>) -> Option<RcuReader<T>> {
         let data = data.into();
         // the RcuCell is acquired now
         let new = match data {
@@ -240,10 +240,7 @@ impl<T> RcuGuard<'_, T> {
         drop(w_lock);
 
         let old_link = LinkWrapper::conv(old);
-        if let Some(inner) = old_link {
-            // drop the old value as a RcuReader
-            drop(RcuReader::<T> { inner });
-        }
+        old_link.map(|inner| RcuReader::<T> { inner })
     }
 
     // get the mut ref of the underlying data
@@ -348,6 +345,15 @@ impl<T> RcuCell<T> {
     #[inline]
     pub fn is_none(&self) -> bool {
         self.link.is_none()
+    }
+
+    pub fn take(&self) -> Option<RcuReader<T>> {
+        let w_lock = self.ptr_lock.write();
+        let ptr = self.link.swap(1, Ordering::AcqRel);
+        drop(w_lock);
+
+        let link = LinkWrapper::conv(ptr);
+        link.map(|inner| RcuReader { inner })
     }
 
     pub fn read(&self) -> Option<RcuReader<T>> {
@@ -480,5 +486,16 @@ mod test {
         assert_ne!(d1, d2);
         assert_eq!(d1, d3);
         assert_ne!(d2, d3);
+    }
+
+    #[test]
+    fn test_rcu_take() {
+        let t = Arc::new(RcuCell::new(10));
+        let t1 = t.clone();
+        let t3 = t.clone();
+        let d1 = t1.take().unwrap();
+        assert_eq!(*d1, 10);
+        let d3 = t3.take();
+        assert!(d3.is_none());
     }
 }
