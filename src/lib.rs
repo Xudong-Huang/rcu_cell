@@ -356,6 +356,18 @@ impl<T> RcuCell<T> {
         }
     }
 
+    /// create from a value
+    pub fn some(data: T) -> Self {
+        let data = Box::new(RcuInner::new(data));
+        let ptr = Box::into_raw(data) as usize;
+        RcuCell {
+            link: LinkWrapper {
+                ptr: AtomicUsize::new(ptr),
+                phantom: PhantomData,
+            },
+        }
+    }
+
     /// create from an option
     pub fn new(data: impl Into<Option<T>>) -> Self {
         let data = data.into();
