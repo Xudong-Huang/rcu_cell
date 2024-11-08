@@ -55,8 +55,21 @@ impl<T> Deref for LinkWrapper<T> {
 
 impl<T> LinkWrapper<T> {
     #[inline]
+    const fn new(ptr: *mut RcuInner<T>) -> Self {
+        LinkWrapper {
+            ptr: AtomicPtr::new(ptr),
+        }
+    }
+
+    #[inline]
     fn is_none(&self) -> bool {
         self.load(Ordering::Acquire).is_null()
+    }
+
+    #[inline]
+    fn get_inner(&self) -> Option<NonNull<RcuInner<T>>> {
+        let ptr = self.load(Ordering::Acquire);
+        NonNull::new(ptr)
     }
 }
 
@@ -71,8 +84,7 @@ impl<T> Drop for LinkWrapper<T> {
 
 impl<T: fmt::Debug> fmt::Debug for LinkWrapper<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let ptr = self.load(Ordering::Acquire);
-        let inner = NonNull::new(ptr);
+        let inner = self.get_inner();
         f.debug_struct("Link").field("inner", &inner).finish()
     }
 }
@@ -192,9 +204,7 @@ impl<T> RcuCell<T> {
     /// create an empty instance
     pub const fn none() -> Self {
         RcuCell {
-            link: LinkWrapper {
-                ptr: AtomicPtr::new(ptr::null_mut()),
-            },
+            link: LinkWrapper::new(ptr::null_mut()),
             ptr_lock: RwLock::new(()),
         }
     }
@@ -204,9 +214,7 @@ impl<T> RcuCell<T> {
         let data = Box::new(RcuInner::new(data));
         let ptr = Box::into_raw(data);
         RcuCell {
-            link: LinkWrapper {
-                ptr: AtomicPtr::new(ptr),
-            },
+            link: LinkWrapper::new(ptr),
             ptr_lock: RwLock::new(()),
         }
     }
@@ -223,9 +231,7 @@ impl<T> RcuCell<T> {
         };
 
         RcuCell {
-            link: LinkWrapper {
-                ptr: AtomicPtr::new(ptr),
-            },
+            link: LinkWrapper::new(ptr),
             ptr_lock: RwLock::new(()),
         }
     }
@@ -272,8 +278,7 @@ impl<T> RcuCell<T> {
     pub fn read(&self) -> Option<RcuReader<T>> {
         let r_lock = self.ptr_lock.read();
 
-        let ptr = self.link.load(Ordering::Acquire);
-        let ret = NonNull::new(ptr).map(|inner| {
+        let ret = self.link.get_inner().map(|inner| {
             // we are sure that the data is still in memroy with the read lock
             unsafe { inner.as_ref().inc_ref() };
             RcuReader { inner }
