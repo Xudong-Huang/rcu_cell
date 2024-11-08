@@ -102,8 +102,8 @@ pub struct RcuReader<T> {
     inner: NonNull<RcuInner<T>>,
 }
 
-unsafe impl<T: Send> Send for RcuReader<T> {}
-unsafe impl<T: Sync> Sync for RcuReader<T> {}
+unsafe impl<T: Send + Sync> Send for RcuReader<T> {}
+unsafe impl<T: Send + Sync> Sync for RcuReader<T> {}
 
 impl<T> Drop for RcuReader<T> {
     #[inline]
