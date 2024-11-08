@@ -43,6 +43,8 @@ impl<T> RcuInner<T> {
 //---------------------------------------------------------------------------------------
 // LinkWrapper
 //---------------------------------------------------------------------------------------
+
+/// A wrapper of the pointer to the RcuInner
 struct LinkWrapper<T> {
     ptr: AtomicPtr<RcuInner<T>>,
 }
