@@ -40,19 +40,16 @@ impl<T> RcuInner<T> {
 //---------------------------------------------------------------------------------------
 // LinkWrapper
 //---------------------------------------------------------------------------------------
-
-struct Link<T> {
+struct LinkWrapper<T> {
     ptr: AtomicUsize,
-    phantom: PhantomData<*const T>,
+    phantom: PhantomData<*const RcuInner<T>>,
 }
-
-struct LinkWrapper<T>(Link<RcuInner<T>>);
 
 impl<T> Deref for LinkWrapper<T> {
     type Target = AtomicUsize;
 
     fn deref(&self) -> &AtomicUsize {
-        &self.0.ptr
+        &self.ptr
     }
 }
 
@@ -145,11 +142,7 @@ impl<T> LinkWrapper<T> {
 
         loop {
             let new = old | 2;
-            match self
-                .0
-                .ptr
-                .compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Acquire)
-            {
+            match self.compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Acquire) {
                 // successfully reserved
                 Ok(_) => return new,
                 // otherwise the link is reserved by others, just spin wait
@@ -305,7 +298,7 @@ impl<T> RcuGuard<'_, T> {
     // pub unsafe fn as_mut(&mut self) -> Option<&mut T> {
     //     // since it's locked and it's safe to update the data
     //     // ignore the reserve bit
-    //     let ptr = self.link.ptr.load(Ordering::Acquire) & !1;
+    //     let ptr = self.link.load(Ordering::Acquire) & !1;
     //     if ptr == 0 {
     //         return None;
     //     }
@@ -355,10 +348,10 @@ impl<T> RcuCell<T> {
     /// create an empty instance
     pub const fn none() -> Self {
         RcuCell {
-            link: LinkWrapper(Link {
+            link: LinkWrapper {
                 ptr: AtomicUsize::new(0),
                 phantom: PhantomData,
-            }),
+            },
         }
     }
 
@@ -367,10 +360,10 @@ impl<T> RcuCell<T> {
         let data = Box::new(RcuInner::new(data));
         let ptr = Box::into_raw(data) as usize;
         RcuCell {
-            link: LinkWrapper(Link {
+            link: LinkWrapper {
                 ptr: AtomicUsize::new(ptr),
                 phantom: PhantomData,
-            }),
+            },
         }
     }
 
@@ -385,10 +378,10 @@ impl<T> RcuCell<T> {
         };
 
         RcuCell {
-            link: LinkWrapper(Link {
+            link: LinkWrapper {
                 ptr: AtomicUsize::new(ptr),
                 phantom: PhantomData,
-            }),
+            },
         }
     }
 
