@@ -27,8 +27,7 @@ fn read_write_1(b: &mut Bencher) {
             let rcu = rcu_cell.clone();
             s.spawn(move || {
                 for i in 0..1000 {
-                    let mut w = rcu.try_lock().unwrap();
-                    w.update(Foo(i));
+                    rcu.write(Foo(i));
                 }
             });
             let readers = 8;

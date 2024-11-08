@@ -68,31 +68,6 @@ impl<T> LinkWrapper<T> {
     fn is_none(&self) -> bool {
         self.load(Ordering::Acquire) & !3 == 0
     }
-
-    // only one thread can acquire the link successfully
-    fn acquire(&self) -> bool {
-        let mut old = self.load(Ordering::Acquire);
-        if old & 1 != 0 {
-            return false;
-        }
-
-        loop {
-            let new = old | 1;
-            match self.compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Acquire) {
-                // successfully reserved
-                Ok(_) => return true,
-                // only try again if old value is still false
-                Err(x) if x & 1 == 0 => old = x,
-                // otherwise return false, which means the link is reserved by others
-                _ => return false,
-            }
-        }
-    }
-
-    // release only happened after acquire
-    fn release(&self) {
-        self.fetch_and(!1, Ordering::Release);
-    }
 }
 
 impl<T> Drop for LinkWrapper<T> {
@@ -202,80 +177,6 @@ impl<T: fmt::Debug> fmt::Debug for RcuReader<T> {
 impl<T> fmt::Pointer for RcuReader<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Pointer::fmt(&(&**self as *const T), f)
-    }
-}
-
-//---------------------------------------------------------------------------------------
-// RcuGuard
-//---------------------------------------------------------------------------------------
-pub struct RcuGuard<'a, T: 'a> {
-    cell: &'a RcuCell<T>,
-}
-
-// unsafe impl<'a, T> !Send for RcuGuard<'a, T> {}
-unsafe impl<T: Sync> Sync for RcuGuard<'_, T> {}
-
-impl<T> RcuGuard<'_, T> {
-    // update the RcuCell with a new value
-    // this would not change the value that hold by readers
-    pub fn write(&mut self, data: T) {
-        self.update(Some(data));
-    }
-
-    // update the RcuCell with a new Option value
-    // this would not change the value that hold by readers
-    pub fn update(&mut self, data: impl Into<Option<T>>) -> Option<RcuReader<T>> {
-        let data = data.into();
-        // the RcuCell is acquired now
-        let new = match data {
-            Some(v) => {
-                let data = Box::new(RcuInner::new(v));
-                Box::into_raw(data) as usize | 1
-            }
-            None => 1,
-        };
-
-        let w_lock = self.cell.ptr_lock.write();
-        let old = self.cell.link.swap(new, Ordering::AcqRel);
-        drop(w_lock);
-
-        let old_link = LinkWrapper::conv(old);
-        old_link.map(|inner| RcuReader::<T> { inner })
-    }
-
-    // get the mut ref of the underlying data
-    // this would change the value that hold by readers so it's not safe
-    // we can't safely update the data when still hold readers
-    // the reader garantee that the data would not change you can read from them
-    // pub unsafe fn as_mut(&mut self) -> Option<&mut T> {
-    //     // since it's locked and it's safe to update the data
-    //     // ignore the reserve bit
-    //     let ptr = self.link.load(Ordering::Acquire) & !1;
-    //     if ptr == 0 {
-    //         return None;
-    //     }
-    //     let inner = { &mut *(ptr as *mut RcuInner<T>) };
-    //     Some(&mut inner.data)
-    // }
-
-    pub fn as_ref(&self) -> Option<&T> {
-        // it's safe to get the ref since locked
-        // ignore the reserve bit
-        let ptr = self.cell.link.load(Ordering::Acquire);
-        let link = LinkWrapper::conv(ptr);
-        link.map(|p| unsafe { &p.as_ref().data })
-    }
-}
-
-impl<T> Drop for RcuGuard<'_, T> {
-    fn drop(&mut self) {
-        self.cell.link.release();
-    }
-}
-
-impl<T: fmt::Debug> fmt::Debug for RcuGuard<'_, T> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        fmt::Debug::fmt(&self.as_ref(), f)
     }
 }
 
@@ -394,10 +295,6 @@ impl<T> RcuCell<T> {
         drop(r_lock);
         ret
     }
-
-    pub fn try_lock(&self) -> Option<RcuGuard<T>> {
-        self.link.acquire().then(|| RcuGuard { cell: self })
-    }
 }
 
 #[cfg(test)]
@@ -440,7 +337,7 @@ mod test {
         let t = RcuCell::new(Some(10));
         let x = t.read();
         let y = t.read();
-        t.try_lock().unwrap().update(None);
+        t.take();
         let z = t.read();
         let a = z.clone();
         drop(t); // t can be dropped before reader
@@ -454,20 +351,15 @@ mod test {
     fn single_thread_clone() {
         let t = Arc::new(RcuCell::new(Some(10)));
         let t1 = t.clone();
-        assert!(t1.read().map(|v| *v) == Some(10));
-        t1.try_lock().unwrap().write(5);
-        assert!(t.read().map(|v| *v) == Some(5));
+        assert_eq!(t1.read().map(|v| *v), Some(10));
+        t1.write(5);
+        assert_eq!(t.read().map(|v| *v), Some(5));
     }
 
     #[test]
-    fn test_rcu_guard() {
+    fn test_rcu_update() {
         let t = RcuCell::new(Some(10));
-        let x = t.read().map(|v| *v);
-        let mut g = t.try_lock().unwrap();
-        let y = x.map(|v| v + 1);
-        g.update(y);
-        assert!(t.try_lock().is_none());
-        drop(g);
+        t.update(|v| v + 1);
         assert_eq!(t.read().map(|v| *v), Some(11));
     }
 
@@ -475,7 +367,7 @@ mod test {
     fn test_is_none() {
         let t = RcuCell::new(10);
         assert!(!t.is_none());
-        t.try_lock().unwrap().update(None);
+        t.take();
         assert!(t.is_none());
     }
 
@@ -485,13 +377,13 @@ mod test {
         let t1 = t.clone();
         let t2 = t.clone();
         let t3 = t.clone();
-        t1.try_lock().unwrap().write(11);
+        t1.write(11);
         drop(t1);
         assert_eq!(t.read().map(|v| *v), Some(11));
-        t2.try_lock().unwrap().write(12);
+        t2.write(12);
         drop(t2);
         assert_eq!(t.read().map(|v| *v), Some(12));
-        t3.try_lock().unwrap().write(13);
+        t3.write(13);
         drop(t3);
         assert_eq!(t.read().map(|v| *v), Some(13));
     }
@@ -504,9 +396,7 @@ mod test {
         let t3 = t.clone();
         let d1 = t1.read().unwrap();
         let d3 = t3.read().unwrap();
-        let mut g = t1.try_lock().unwrap();
-        g.update(11);
-        drop(g);
+        t1.write(11);
         let d2 = t2.read().unwrap();
         assert_ne!(d1, d2);
         assert_eq!(d1, d3);
