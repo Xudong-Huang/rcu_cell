@@ -36,8 +36,8 @@ jobs:
         with:
           command: clippy
           args: -- -D warnings
-      - name: Run cargo clippy tests
+      - name: Run cargo release tests
         uses: actions-rs/cargo@v1
         with:
-          command: clippy
-          args: --tests --release -- -D warnings
+          command: test
+          args: --release
