@@ -283,12 +283,7 @@ impl<T> RcuGuard<'_, T> {
     // update the RcuCell with a new value
     // this would not change the value that hold by readers
     pub fn write(&mut self, data: T) {
-        // the RcuCell is acquired now
-        let old_link = self.link.swap(Some(data));
-        if let Some(inner) = old_link {
-            // drop the old value as a RcuReader
-            drop(RcuReader::<T> { inner });
-        }
+        self.update(Some(data));
     }
 
     // update the RcuCell with a new Option value
