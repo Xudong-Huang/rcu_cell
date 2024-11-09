@@ -4,7 +4,7 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
-use parking_lot::RwLock;
+use spin::RwLock;
 
 use core::ops::Deref;
 use core::ptr::NonNull;
