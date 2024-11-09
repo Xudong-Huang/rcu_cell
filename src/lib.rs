@@ -77,15 +77,6 @@ impl<T> LinkWrapper<T> {
     }
 }
 
-impl<T> Drop for LinkWrapper<T> {
-    fn drop(&mut self) {
-        let ptr = self.load(Ordering::Acquire);
-        if let Some(inner) = NonNull::new(ptr) {
-            drop(RcuReader { inner })
-        }
-    }
-}
-
 impl<T: fmt::Debug> fmt::Debug for LinkWrapper<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let inner = self.get_inner();
@@ -110,7 +101,6 @@ impl<T> Drop for RcuReader<T> {
     fn drop(&mut self) {
         let inner = unsafe { self.inner.as_mut() };
         if inner.dec_ref() == 0 {
-            core::sync::atomic::fence(Ordering::Acquire);
             // drop the inner box
             let _ = unsafe { Box::from_raw(inner) };
         }
@@ -134,8 +124,7 @@ impl<T> AsRef<T> for RcuReader<T> {
 
 impl<T> Clone for RcuReader<T> {
     fn clone(&self) -> Self {
-        let cnt = unsafe { self.inner.as_ref().inc_ref() };
-        assert!(cnt > 0);
+        unsafe { self.inner.as_ref() }.inc_ref();
         RcuReader { inner: self.inner }
     }
 }
@@ -199,12 +188,20 @@ pub struct RcuCell<T> {
     ptr_lock: RwLock<()>,
 }
 
-unsafe impl<T: Send> Send for RcuCell<T> {}
-unsafe impl<T: Sync> Sync for RcuCell<T> {}
+unsafe impl<T: Send + Sync> Send for RcuCell<T> {}
+unsafe impl<T: Send + Sync> Sync for RcuCell<T> {}
+
+impl<T> Drop for RcuCell<T> {
+    fn drop(&mut self) {
+        if let Some(inner) = self.link.get_inner() {
+            drop(RcuReader { inner })
+        }
+    }
+}
 
 impl<T> Default for RcuCell<T> {
     fn default() -> Self {
-        RcuCell::new(None)
+        RcuCell::none()
     }
 }
 
@@ -230,17 +227,9 @@ impl<T> RcuCell<T> {
     /// create from an option
     pub fn new(data: impl Into<Option<T>>) -> Self {
         let data = data.into();
-        let ptr = match data {
-            Some(data) => {
-                let data = Box::new(RcuInner::new(data));
-                Box::into_raw(data)
-            }
-            None => ptr::null_mut(),
-        };
-
-        RcuCell {
-            link: LinkWrapper::new(ptr),
-            ptr_lock: RwLock::new(()),
+        match data {
+            Some(data) => Self::some(data),
+            None => Self::none(),
         }
     }
 
@@ -252,10 +241,7 @@ impl<T> RcuCell<T> {
 
     fn inner_update(&self, data: Option<T>) -> Option<RcuReader<T>> {
         let new = match data {
-            Some(v) => {
-                let data = Box::new(RcuInner::new(v));
-                Box::into_raw(data)
-            }
+            Some(v) => Box::into_raw(Box::new(RcuInner::new(v))),
             None => ptr::null_mut(),
         };
 
@@ -284,8 +270,8 @@ impl<T> RcuCell<T> {
         F: FnOnce(&T) -> T,
     {
         let v = self.read();
-        let data = v.as_ref().map(|v| f(v));
-        self.inner_update(data)
+        let data = v.as_ref().map(|v| f(v))?;
+        self.write(data)
     }
 
     /// create a reader of the rcu cell
