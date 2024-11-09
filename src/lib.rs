@@ -250,7 +250,7 @@ impl<T> RcuCell<T> {
         drop(w_lock);
 
         let old_link = NonNull::new(old);
-        old_link.map(|inner| RcuReader::<T> { inner })
+        old_link.map(|inner| RcuReader { inner })
     }
 
     /// take the value from the rcu cell
@@ -276,16 +276,12 @@ impl<T> RcuCell<T> {
 
     /// create a reader of the rcu cell
     pub fn read(&self) -> Option<RcuReader<T>> {
-        let r_lock = self.ptr_lock.read();
+        let _r_lock = self.ptr_lock.read();
 
-        let ret = self.link.get_inner().map(|inner| {
-            // we are sure that the data is still in memroy with the read lock
-            unsafe { inner.as_ref().inc_ref() };
-            RcuReader { inner }
-        });
-
-        drop(r_lock);
-        ret
+        let inner = self.link.get_inner()?;
+        // we are sure that the data is still in memroy with the read lock
+        unsafe { inner.as_ref() }.inc_ref();
+        Some(RcuReader { inner })
     }
 }
 
