@@ -67,12 +67,12 @@ impl<T> LinkWrapper<T> {
 
     #[inline]
     fn is_none(&self) -> bool {
-        self.load(Ordering::Acquire).is_null()
+        self.load(Ordering::Relaxed).is_null()
     }
 
     #[inline]
     fn get_inner(&self) -> Option<NonNull<RcuInner<T>>> {
-        let ptr = self.load(Ordering::Acquire);
+        let ptr = self.load(Ordering::Relaxed);
         NonNull::new(ptr)
     }
 }
@@ -246,7 +246,8 @@ impl<T> RcuCell<T> {
         };
 
         let w_lock = self.ptr_lock.write();
-        let old = self.link.swap(new, Ordering::AcqRel);
+        let old = self.link.load(Ordering::Relaxed);
+        self.link.store(new, Ordering::Relaxed);
         drop(w_lock);
 
         let old_link = NonNull::new(old);
