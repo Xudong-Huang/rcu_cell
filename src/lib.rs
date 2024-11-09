@@ -188,7 +188,7 @@ pub struct RcuCell<T> {
     ptr_lock: RwLock<()>,
 }
 
-unsafe impl<T: Send + Sync> Send for RcuCell<T> {}
+unsafe impl<T: Send> Send for RcuCell<T> {}
 unsafe impl<T: Send + Sync> Sync for RcuCell<T> {}
 
 impl<T> Drop for RcuCell<T> {
