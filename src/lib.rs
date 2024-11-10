@@ -49,14 +49,6 @@ struct LinkWrapper<T> {
     ptr: AtomicPtr<RcuInner<T>>,
 }
 
-impl<T> Deref for LinkWrapper<T> {
-    type Target = AtomicPtr<RcuInner<T>>;
-
-    fn deref(&self) -> &AtomicPtr<RcuInner<T>> {
-        &self.ptr
-    }
-}
-
 impl<T> LinkWrapper<T> {
     #[inline]
     const fn new(ptr: *mut RcuInner<T>) -> Self {
@@ -67,12 +59,12 @@ impl<T> LinkWrapper<T> {
 
     #[inline]
     fn is_none(&self) -> bool {
-        self.load(Ordering::Relaxed).is_null()
+        self.ptr.load(Ordering::Relaxed).is_null()
     }
 
     #[inline]
     fn get_inner(&self) -> Option<NonNull<RcuInner<T>>> {
-        let ptr = self.load(Ordering::Relaxed);
+        let ptr = self.ptr.load(Ordering::Relaxed);
         NonNull::new(ptr)
     }
 }
@@ -246,8 +238,8 @@ impl<T> RcuCell<T> {
         };
 
         let w_lock = self.ptr_lock.write();
-        let old = self.link.load(Ordering::Relaxed);
-        self.link.store(new, Ordering::Relaxed);
+        let old = self.link.ptr.load(Ordering::Relaxed);
+        self.link.ptr.store(new, Ordering::Relaxed);
         drop(w_lock);
 
         let old_link = NonNull::new(old);
