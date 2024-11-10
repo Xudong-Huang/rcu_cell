@@ -91,3 +91,42 @@ fn read_write_2(b: &mut Bencher) {
         assert_eq!(REF.load(Ordering::Relaxed), 2001);
     });
 }
+
+#[bench]
+fn arc_swap(b: &mut Bencher) {
+    use arc_swap::ArcSwap;
+    static REF: AtomicUsize = AtomicUsize::new(0);
+
+    struct Foo(usize);
+
+    impl Drop for Foo {
+        fn drop(&mut self) {
+            REF.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    b.iter(|| {
+        REF.store(0, Ordering::Relaxed);
+        let arc_swap = Arc::new(ArcSwap::new(Arc::new(Foo(42))));
+        std::thread::scope(|s| {
+            let rcu = arc_swap.clone();
+            s.spawn(move || {
+                for i in 0..1000 {
+                    rcu.store(Arc::new(Foo(i)));
+                }
+            });
+            let readers = 8;
+            for _ in 0..readers {
+                let rcu = arc_swap.clone();
+                s.spawn(move || {
+                    for _i in 0..1000 {
+                        let _v = rcu.load();
+                    }
+                });
+            }
+        });
+        assert_eq!(arc_swap.load().0, 999);
+        drop(arc_swap);
+        assert_eq!(REF.load(Ordering::Relaxed), 1001);
+    });
+}
