@@ -1,12 +1,15 @@
 #![doc = include_str!("../README.md")]
 #![no_std]
 
+#![feature(coerce_unsized, unsize)]
+
 extern crate alloc;
 
 use alloc::boxed::Box;
 use spin::RwLock;
 
-use core::ops::Deref;
+use core::marker::Unsize;
+use core::ops::{CoerceUnsized, Deref};
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 use core::{cmp, fmt, ptr};
@@ -15,7 +18,7 @@ use core::{cmp, fmt, ptr};
 // RcuInner
 //---------------------------------------------------------------------------------------
 #[derive(Debug)]
-struct RcuInner<T> {
+struct RcuInner<T: ?Sized> {
     refs: AtomicUsize,
     data: T,
 }
@@ -28,7 +31,9 @@ impl<T> RcuInner<T> {
             data,
         }
     }
+}
 
+impl<T: ?Sized> RcuInner<T> {
     #[inline]
     fn inc_ref(&self) -> usize {
         self.refs.fetch_add(1, Ordering::Release)
@@ -81,14 +86,14 @@ impl<T: fmt::Debug> fmt::Debug for LinkWrapper<T> {
 //---------------------------------------------------------------------------------------
 
 /// A reader of RCU cell, it behaves like `Arc<T>`
-pub struct RcuReader<T> {
+pub struct RcuReader<T: ?Sized> {
     inner: NonNull<RcuInner<T>>,
 }
 
-unsafe impl<T: Send + Sync> Send for RcuReader<T> {}
-unsafe impl<T: Send + Sync> Sync for RcuReader<T> {}
+unsafe impl<T: Send + Sync + ?Sized> Send for RcuReader<T> {}
+unsafe impl<T: Send + Sync + ?Sized> Sync for RcuReader<T> {}
 
-impl<T> Drop for RcuReader<T> {
+impl<T: ?Sized> Drop for RcuReader<T> {
     #[inline]
     fn drop(&mut self) {
         let inner = unsafe { self.inner.as_mut() };
@@ -99,7 +104,7 @@ impl<T> Drop for RcuReader<T> {
     }
 }
 
-impl<T> Deref for RcuReader<T> {
+impl<T: ?Sized> Deref for RcuReader<T> {
     type Target = T;
 
     #[inline]
@@ -108,26 +113,26 @@ impl<T> Deref for RcuReader<T> {
     }
 }
 
-impl<T> AsRef<T> for RcuReader<T> {
+impl<T: ?Sized> AsRef<T> for RcuReader<T> {
     fn as_ref(&self) -> &T {
         self.deref()
     }
 }
 
-impl<T> Clone for RcuReader<T> {
+impl<T: ?Sized> Clone for RcuReader<T> {
     fn clone(&self) -> Self {
         unsafe { self.inner.as_ref() }.inc_ref();
         RcuReader { inner: self.inner }
     }
 }
 
-impl<T: PartialEq> PartialEq for RcuReader<T> {
+impl<T: PartialEq + ?Sized> PartialEq for RcuReader<T> {
     fn eq(&self, other: &RcuReader<T>) -> bool {
         *(*self) == *(*other)
     }
 }
 
-impl<T: PartialOrd> PartialOrd for RcuReader<T> {
+impl<T: PartialOrd + ?Sized> PartialOrd for RcuReader<T> {
     fn partial_cmp(&self, other: &RcuReader<T>) -> Option<cmp::Ordering> {
         (**self).partial_cmp(&**other)
     }
@@ -149,13 +154,13 @@ impl<T: PartialOrd> PartialOrd for RcuReader<T> {
     }
 }
 
-impl<T: Ord> Ord for RcuReader<T> {
+impl<T: Ord + ?Sized> Ord for RcuReader<T> {
     fn cmp(&self, other: &RcuReader<T>) -> cmp::Ordering {
         (**self).cmp(&**other)
     }
 }
 
-impl<T: Eq> Eq for RcuReader<T> {}
+impl<T: Eq + ?Sized> Eq for RcuReader<T> {}
 
 impl<T: fmt::Debug> fmt::Debug for RcuReader<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -163,7 +168,7 @@ impl<T: fmt::Debug> fmt::Debug for RcuReader<T> {
     }
 }
 
-impl<T> fmt::Pointer for RcuReader<T> {
+impl<T: ?Sized> fmt::Pointer for RcuReader<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Pointer::fmt(&(&**self as *const T), f)
     }
@@ -277,6 +282,8 @@ impl<T> RcuCell<T> {
         Some(RcuReader { inner })
     }
 }
+
+impl<T: ?Sized + Unsize<U>, U: ?Sized> CoerceUnsized<RcuReader<U>> for RcuReader<T> {}
 
 #[cfg(test)]
 mod test {
@@ -396,5 +403,13 @@ mod test {
         assert!(d2.is_none());
         let d3 = t2.read().unwrap();
         assert_eq!(*d3, 42);
+    }
+
+    #[test]
+    fn coerce_test() {
+        let t = RcuCell::new([10; 2]);
+        let d1 = t.read().unwrap();
+        let d2: RcuReader<[usize]> = d1;
+        assert_eq!(d2.len(), 2);
     }
 }
