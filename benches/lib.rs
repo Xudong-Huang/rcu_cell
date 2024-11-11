@@ -159,7 +159,7 @@ fn rwlock_arc(b: &mut Bencher) {
                 let rcu = arc_swap.clone();
                 s.spawn(move || {
                     for _i in 0..1000 {
-                        let _v = rcu.read();
+                        let _v: Arc<_> = rcu.read().clone();
                     }
                 });
             }
