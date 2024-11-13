@@ -9,10 +9,12 @@ A lockless rcu cell implementation that can be used safely in multithread contex
 ## Features
 
 - Support multi-thread read and write operations.
-- The read operation would not block other read operation.
-- The read operation is something like Arc::clone
+- The read operation would not block other read operations.
+- The read operation is always waitless.
+- The read operation is something like Arc::clone.
+- The write operation would not block other read operations.
+- The write operation is lockless.
 - The write operation is something like Atomic Swap.
-- The write operation would block all read operations.
 - The RcuCell could contain no data
 - Could be compiled with no_std
 
