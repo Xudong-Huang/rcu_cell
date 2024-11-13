@@ -9,6 +9,26 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 #[bench]
+fn rcu_read(b: &mut Bencher) {
+    let rcu_cell = Arc::new(RcuCell::new(10));
+    b.iter(|| {
+        let v = rcu_cell.read().unwrap();
+        test::black_box(&*v);
+    });
+}
+
+#[bench]
+fn rcu_write(b: &mut Bencher) {
+    let rcu_cell = Arc::new(RcuCell::new(0));
+    let mut i = 0;
+    b.iter(|| {
+        i += 1;
+        let v = rcu_cell.write(i).unwrap();
+        assert_eq!(*v, i - 1);
+    });
+}
+
+#[bench]
 fn read_write_1(b: &mut Bencher) {
     static REF: AtomicUsize = AtomicUsize::new(0);
 
