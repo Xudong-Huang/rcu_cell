@@ -35,7 +35,8 @@ fn read_write_1(b: &mut Bencher) {
                 let rcu = rcu_cell.clone();
                 s.spawn(move || {
                     for _i in 0..1000 {
-                        let _v = rcu.read().unwrap();
+                        let v = rcu.read().unwrap();
+                        test::black_box(&*v);
                     }
                 });
             }
@@ -81,7 +82,8 @@ fn read_write_2(b: &mut Bencher) {
                 let rcu = rcu_cell.clone();
                 s.spawn(move || {
                     for _i in 0..1000 {
-                        let _v = rcu.read().unwrap();
+                        let v = rcu.read().unwrap();
+                        test::black_box(&*v);
                     }
                 });
             }
@@ -120,7 +122,8 @@ fn arc_swap(b: &mut Bencher) {
                 let rcu = arc_swap.clone();
                 s.spawn(move || {
                     for _i in 0..1000 {
-                        let _v = rcu.load();
+                        let v = rcu.load();
+                        test::black_box(&*v);
                     }
                 });
             }

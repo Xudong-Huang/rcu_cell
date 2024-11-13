@@ -11,27 +11,25 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use core::{fmt, ptr};
 
 #[cfg(target_pointer_width = "64")]
-const LEADING_BITS: usize = 16;
-#[cfg(target_pointer_width = "64")]
-const REFCOUNT_MASK: usize = 0x0007_FFFF;
+const LEADING_BITS: usize = 8;
 #[cfg(target_pointer_width = "32")]
 const LEADING_BITS: usize = 0;
-#[cfg(target_pointer_width = "32")]
-const REFCOUNT_MASK: usize = 0x7;
+
+const REFCOUNT_MASK: usize = (1 << (LEADING_BITS + 3)) - 1;
 
 //---------------------------------------------------------------------------------------
 // LinkWrapper
 //---------------------------------------------------------------------------------------
 
+union Ptr<T> {
+    addr: usize,
+    ptr: *const T,
+}
+
 /// A wrapper of the pointer to the inner data
 struct LinkWrapper<T> {
     ptr: AtomicUsize,
     phantom: PhantomData<T>,
-}
-
-union Ptr<T> {
-    addr: usize,
-    ptr: *const T,
 }
 
 impl<T> LinkWrapper<T> {
@@ -57,11 +55,7 @@ impl<T> LinkWrapper<T> {
         }
 
         let ptr = (old >> LEADING_BITS) as *const T;
-        if ptr.is_null() {
-            None
-        } else {
-            Some(unsafe { Arc::from_raw(ptr) })
-        }
+        (!ptr.is_null()).then(|| unsafe { Arc::from_raw(ptr) })
     }
 
     #[inline]
@@ -71,12 +65,10 @@ impl<T> LinkWrapper<T> {
 
     #[inline]
     fn ptr_to_arc(ptr: *const T) -> Option<Arc<T>> {
-        if ptr.is_null() {
-            None
-        } else {
+        (!ptr.is_null()).then(|| {
             let inner = ManuallyDrop::new(unsafe { Arc::from_raw(ptr) });
-            Some((&*inner).clone())
-        }
+            Arc::clone(&inner)
+        })
     }
 
     #[inline]
@@ -90,7 +82,7 @@ impl<T> LinkWrapper<T> {
 
     #[inline]
     fn dec_ref(&self) {
-        self.ptr.fetch_sub(1, Ordering::Relaxed);
+        self.ptr.fetch_sub(1, Ordering::Release);
     }
 
     #[inline]
@@ -165,6 +157,7 @@ impl<T> RcuCell<T> {
         self.link.is_none()
     }
 
+    #[inline]
     fn inner_update(&self, data: Option<T>) -> Option<Arc<T>> {
         let new_ptr = match data {
             Some(data) => Arc::into_raw(Arc::new(data)),
@@ -174,11 +167,13 @@ impl<T> RcuCell<T> {
     }
 
     /// take the value from the rcu cell
+    #[inline]
     pub fn take(&self) -> Option<Arc<T>> {
         self.inner_update(None)
     }
 
     /// write a value to the rcu cell and return the old value
+    #[inline]
     pub fn write(&self, data: T) -> Option<Arc<T>> {
         self.inner_update(Some(data))
     }
@@ -195,6 +190,7 @@ impl<T> RcuCell<T> {
     }
 
     /// create a reader of the rcu cell
+    #[inline]
     pub fn read(&self) -> Option<Arc<T>> {
         self.link.get_inner()
     }
