@@ -12,7 +12,7 @@ use core::{fmt, ptr};
 
 #[cfg(target_pointer_width = "64")]
 const LEADING_BITS: usize = 8;
-#[cfg(target_pointer_width = "32")]
+#[cfg(not(target_pointer_width = "64"))]
 const LEADING_BITS: usize = 0;
 
 const REFCOUNT_MASK: usize = (1 << (LEADING_BITS + 3)) - 1;
@@ -29,7 +29,7 @@ union Ptr<T> {
 /// A wrapper of the pointer to the inner data
 struct LinkWrapper<T> {
     ptr: AtomicUsize,
-    phantom: PhantomData<T>,
+    phantom: PhantomData<*const T>,
 }
 
 impl<T> LinkWrapper<T> {
@@ -44,7 +44,7 @@ impl<T> LinkWrapper<T> {
 
     fn update(&self, ptr: *const T) -> Option<Arc<T>> {
         let new = unsafe { Ptr { ptr }.addr } << LEADING_BITS;
-        let mut old = self.ptr.load(Ordering::Acquire) & !REFCOUNT_MASK;
+        let mut old = self.ptr.load(Ordering::Relaxed) & !REFCOUNT_MASK;
 
         while let Err(addr) =
             self.ptr
@@ -55,7 +55,7 @@ impl<T> LinkWrapper<T> {
         }
 
         let ptr = (old >> LEADING_BITS) as *const T;
-        (!ptr.is_null()).then(|| unsafe { Arc::from_raw(ptr) })
+        Self::ptr_to_arc(ptr)
     }
 
     #[inline]
@@ -65,10 +65,7 @@ impl<T> LinkWrapper<T> {
 
     #[inline]
     fn ptr_to_arc(ptr: *const T) -> Option<Arc<T>> {
-        (!ptr.is_null()).then(|| {
-            let inner = ManuallyDrop::new(unsafe { Arc::from_raw(ptr) });
-            Arc::clone(&inner)
-        })
+        (!ptr.is_null()).then(|| unsafe { Arc::from_raw(ptr) })
     }
 
     #[inline]
@@ -86,9 +83,10 @@ impl<T> LinkWrapper<T> {
     }
 
     #[inline]
-    fn get_inner(&self) -> Option<Arc<T>> {
+    fn clone_inner(&self) -> Option<Arc<T>> {
         let ptr = self.inc_ref();
         let ret = Self::ptr_to_arc(ptr);
+        let _ = ManuallyDrop::new(ret.clone());
         self.dec_ref();
         ret
     }
@@ -96,7 +94,7 @@ impl<T> LinkWrapper<T> {
 
 impl<T: fmt::Debug> fmt::Debug for LinkWrapper<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let inner = self.get_inner();
+        let inner = self.clone_inner();
         f.debug_struct("Link").field("inner", &inner).finish()
     }
 }
@@ -192,7 +190,7 @@ impl<T> RcuCell<T> {
     /// create a reader of the rcu cell
     #[inline]
     pub fn read(&self) -> Option<Arc<T>> {
-        self.link.get_inner()
+        self.link.clone_inner()
     }
 }
 
