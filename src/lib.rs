@@ -3,69 +3,102 @@
 
 extern crate alloc;
 
-use alloc::boxed::Box;
-use spin::RwLock;
+use alloc::sync::Arc;
 
-use core::ops::Deref;
-use core::ptr::NonNull;
-use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
-use core::{cmp, fmt, ptr};
+use core::marker::PhantomData;
+use core::mem::ManuallyDrop;
+use core::sync::atomic::{AtomicUsize, Ordering};
+use core::{fmt, ptr};
 
-//---------------------------------------------------------------------------------------
-// RcuInner
-//---------------------------------------------------------------------------------------
-#[derive(Debug)]
-struct RcuInner<T> {
-    refs: AtomicUsize,
-    data: T,
-}
-
-impl<T> RcuInner<T> {
-    #[inline]
-    fn new(data: T) -> Self {
-        RcuInner {
-            refs: AtomicUsize::new(1),
-            data,
-        }
-    }
-
-    #[inline]
-    fn inc_ref(&self) -> usize {
-        self.refs.fetch_add(1, Ordering::Release)
-    }
-
-    #[inline]
-    fn dec_ref(&self) -> usize {
-        self.refs.fetch_sub(1, Ordering::Release) - 1
-    }
-}
+#[cfg(target_pointer_width = "64")]
+const LEADING_BITS: usize = 16;
+#[cfg(target_pointer_width = "64")]
+const REFCOUNT_MASK: usize = 0x0007_FFFF;
+#[cfg(target_pointer_width = "32")]
+const LEADING_BITS: usize = 0;
+#[cfg(target_pointer_width = "32")]
+const REFCOUNT_MASK: usize = 0x7;
 
 //---------------------------------------------------------------------------------------
 // LinkWrapper
 //---------------------------------------------------------------------------------------
 
-/// A wrapper of the pointer to the RcuInner
+/// A wrapper of the pointer to the inner data
 struct LinkWrapper<T> {
-    ptr: AtomicPtr<RcuInner<T>>,
+    ptr: AtomicUsize,
+    phantom: PhantomData<T>,
+}
+
+union Ptr<T> {
+    addr: usize,
+    ptr: *const T,
 }
 
 impl<T> LinkWrapper<T> {
     #[inline]
-    const fn new(ptr: *mut RcuInner<T>) -> Self {
+    const fn new(ptr: *const T) -> Self {
+        let addr: usize = unsafe { Ptr { ptr }.addr };
         LinkWrapper {
-            ptr: AtomicPtr::new(ptr),
+            ptr: AtomicUsize::new(addr << LEADING_BITS),
+            phantom: PhantomData,
+        }
+    }
+
+    fn update(&self, ptr: *const T) -> Option<Arc<T>> {
+        let new = unsafe { Ptr { ptr }.addr } << LEADING_BITS;
+        let mut old = self.ptr.load(Ordering::Acquire) & !REFCOUNT_MASK;
+
+        while let Err(addr) =
+            self.ptr
+                .compare_exchange_weak(old, new, Ordering::Acquire, Ordering::Relaxed)
+        {
+            old = addr & !REFCOUNT_MASK;
+            core::hint::spin_loop();
+        }
+
+        let ptr = (old >> LEADING_BITS) as *const T;
+        if ptr.is_null() {
+            None
+        } else {
+            Some(unsafe { Arc::from_raw(ptr) })
         }
     }
 
     #[inline]
     fn is_none(&self) -> bool {
-        self.ptr.load(Ordering::Relaxed).is_null()
+        self.ptr.load(Ordering::Relaxed) & !REFCOUNT_MASK == 0
     }
 
     #[inline]
-    fn get_inner(&self) -> Option<NonNull<RcuInner<T>>> {
-        let ptr = self.ptr.load(Ordering::Relaxed);
-        NonNull::new(ptr)
+    fn ptr_to_arc(ptr: *const T) -> Option<Arc<T>> {
+        if ptr.is_null() {
+            None
+        } else {
+            let inner = ManuallyDrop::new(unsafe { Arc::from_raw(ptr) });
+            Some((&*inner).clone())
+        }
+    }
+
+    #[inline]
+    fn inc_ref(&self) -> *const T {
+        let addr = self.ptr.fetch_add(1, Ordering::Relaxed);
+        let refs = addr & REFCOUNT_MASK;
+        assert!(refs < REFCOUNT_MASK);
+        let ptr = (addr & !REFCOUNT_MASK) >> LEADING_BITS;
+        ptr as *const T
+    }
+
+    #[inline]
+    fn dec_ref(&self) {
+        self.ptr.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    fn get_inner(&self) -> Option<Arc<T>> {
+        let ptr = self.inc_ref();
+        let ret = Self::ptr_to_arc(ptr);
+        self.dec_ref();
+        ret
     }
 }
 
@@ -77,99 +110,6 @@ impl<T: fmt::Debug> fmt::Debug for LinkWrapper<T> {
 }
 
 //---------------------------------------------------------------------------------------
-// RcuReader
-//---------------------------------------------------------------------------------------
-
-/// A reader of RCU cell, it behaves like `Arc<T>`
-pub struct RcuReader<T> {
-    inner: NonNull<RcuInner<T>>,
-}
-
-unsafe impl<T: Send + Sync> Send for RcuReader<T> {}
-unsafe impl<T: Send + Sync> Sync for RcuReader<T> {}
-
-impl<T> Drop for RcuReader<T> {
-    #[inline]
-    fn drop(&mut self) {
-        let inner = unsafe { self.inner.as_mut() };
-        if inner.dec_ref() == 0 {
-            // drop the inner box
-            let _ = unsafe { Box::from_raw(inner) };
-        }
-    }
-}
-
-impl<T> Deref for RcuReader<T> {
-    type Target = T;
-
-    #[inline]
-    fn deref(&self) -> &T {
-        unsafe { &self.inner.as_ref().data }
-    }
-}
-
-impl<T> AsRef<T> for RcuReader<T> {
-    fn as_ref(&self) -> &T {
-        self.deref()
-    }
-}
-
-impl<T> Clone for RcuReader<T> {
-    fn clone(&self) -> Self {
-        unsafe { self.inner.as_ref() }.inc_ref();
-        RcuReader { inner: self.inner }
-    }
-}
-
-impl<T: PartialEq> PartialEq for RcuReader<T> {
-    fn eq(&self, other: &RcuReader<T>) -> bool {
-        *(*self) == *(*other)
-    }
-}
-
-impl<T: PartialOrd> PartialOrd for RcuReader<T> {
-    fn partial_cmp(&self, other: &RcuReader<T>) -> Option<cmp::Ordering> {
-        (**self).partial_cmp(&**other)
-    }
-
-    fn lt(&self, other: &RcuReader<T>) -> bool {
-        *(*self) < *(*other)
-    }
-
-    fn le(&self, other: &RcuReader<T>) -> bool {
-        *(*self) <= *(*other)
-    }
-
-    fn gt(&self, other: &RcuReader<T>) -> bool {
-        *(*self) > *(*other)
-    }
-
-    fn ge(&self, other: &RcuReader<T>) -> bool {
-        *(*self) >= *(*other)
-    }
-}
-
-impl<T: Ord> Ord for RcuReader<T> {
-    fn cmp(&self, other: &RcuReader<T>) -> cmp::Ordering {
-        (**self).cmp(&**other)
-    }
-}
-
-impl<T: Eq> Eq for RcuReader<T> {}
-
-impl<T: fmt::Debug> fmt::Debug for RcuReader<T> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        fmt::Debug::fmt(&**self, f)
-    }
-}
-
-impl<T> fmt::Pointer for RcuReader<T> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        fmt::Pointer::fmt(&(&**self as *const T), f)
-    }
-}
-
-//---------------------------------------------------------------------------------------
 // RcuCell
 //---------------------------------------------------------------------------------------
 
@@ -177,7 +117,6 @@ impl<T> fmt::Pointer for RcuReader<T> {
 #[derive(Debug)]
 pub struct RcuCell<T> {
     link: LinkWrapper<T>,
-    ptr_lock: RwLock<()>,
 }
 
 unsafe impl<T: Send> Send for RcuCell<T> {}
@@ -185,9 +124,7 @@ unsafe impl<T: Send + Sync> Sync for RcuCell<T> {}
 
 impl<T> Drop for RcuCell<T> {
     fn drop(&mut self) {
-        if let Some(inner) = self.link.get_inner() {
-            drop(RcuReader { inner })
-        }
+        self.take();
     }
 }
 
@@ -201,18 +138,15 @@ impl<T> RcuCell<T> {
     /// create an empty instance
     pub const fn none() -> Self {
         RcuCell {
-            link: LinkWrapper::new(ptr::null_mut()),
-            ptr_lock: RwLock::new(()),
+            link: LinkWrapper::new(ptr::null()),
         }
     }
 
     /// create from a value
     pub fn some(data: T) -> Self {
-        let data = Box::new(RcuInner::new(data));
-        let ptr = Box::into_raw(data);
+        let ptr = Arc::into_raw(Arc::new(data));
         RcuCell {
             link: LinkWrapper::new(ptr),
-            ptr_lock: RwLock::new(()),
         }
     }
 
@@ -231,34 +165,27 @@ impl<T> RcuCell<T> {
         self.link.is_none()
     }
 
-    fn inner_update(&self, data: Option<T>) -> Option<RcuReader<T>> {
-        let new = match data {
-            Some(v) => Box::into_raw(Box::new(RcuInner::new(v))),
+    fn inner_update(&self, data: Option<T>) -> Option<Arc<T>> {
+        let new_ptr = match data {
+            Some(data) => Arc::into_raw(Arc::new(data)),
             None => ptr::null_mut(),
         };
-
-        let w_lock = self.ptr_lock.write();
-        let old = self.link.ptr.load(Ordering::Relaxed);
-        self.link.ptr.store(new, Ordering::Relaxed);
-        drop(w_lock);
-
-        let old_link = NonNull::new(old);
-        old_link.map(|inner| RcuReader { inner })
+        self.link.update(new_ptr)
     }
 
     /// take the value from the rcu cell
-    pub fn take(&self) -> Option<RcuReader<T>> {
+    pub fn take(&self) -> Option<Arc<T>> {
         self.inner_update(None)
     }
 
     /// write a value to the rcu cell and return the old value
-    pub fn write(&self, data: T) -> Option<RcuReader<T>> {
+    pub fn write(&self, data: T) -> Option<Arc<T>> {
         self.inner_update(Some(data))
     }
 
     /// update the value with a closure in the rcu cell
     /// and return the old value
-    pub fn update<F>(&self, f: F) -> Option<RcuReader<T>>
+    pub fn update<F>(&self, f: F) -> Option<Arc<T>>
     where
         F: FnOnce(&T) -> T,
     {
@@ -268,13 +195,8 @@ impl<T> RcuCell<T> {
     }
 
     /// create a reader of the rcu cell
-    pub fn read(&self) -> Option<RcuReader<T>> {
-        let _r_lock = self.ptr_lock.read();
-
-        let inner = self.link.get_inner()?;
-        // we are sure that the data is still in memroy with the read lock
-        unsafe { inner.as_ref() }.inc_ref();
-        Some(RcuReader { inner })
+    pub fn read(&self) -> Option<Arc<T>> {
+        self.link.get_inner()
     }
 }
 

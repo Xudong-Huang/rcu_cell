@@ -13,8 +13,6 @@ license = "LGPL-3.0"
 readme = "./README.md"
 exclude = [".gitignore", "benches/**"]
 
-[dependencies]
-spin = "0.9"
-
 [dev-dependencies]
+spin = "0.9"
 arc-swap = "1.7"
