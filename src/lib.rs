@@ -12,10 +12,14 @@ use core::{fmt, ptr};
 
 #[cfg(target_pointer_width = "64")]
 const LEADING_BITS: usize = 8;
+#[cfg(target_pointer_width = "64")]
+const ALIGN_BITS: usize = 3;
 #[cfg(not(target_pointer_width = "64"))]
 const LEADING_BITS: usize = 0;
+#[cfg(not(target_pointer_width = "64"))]
+const ALIGN_BITS: usize = 2;
 
-const REFCOUNT_MASK: usize = (1 << (LEADING_BITS + 3)) - 1;
+const REFCOUNT_MASK: usize = (1 << (LEADING_BITS + ALIGN_BITS)) - 1;
 
 //---------------------------------------------------------------------------------------
 // LinkWrapper
