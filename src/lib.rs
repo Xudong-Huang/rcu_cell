@@ -180,8 +180,7 @@ impl<T> RcuCell<T> {
         self.inner_update(Some(data))
     }
 
-    /// update the value with a closure in the rcu cell
-    /// and return the old value
+    /// update the value with a closure and return the old value
     pub fn update<F>(&self, f: F) -> Option<Arc<T>>
     where
         F: FnOnce(&T) -> T,
@@ -191,7 +190,7 @@ impl<T> RcuCell<T> {
         self.write(data)
     }
 
-    /// create a reader of the rcu cell
+    /// read out the inner Arc value
     #[inline]
     pub fn read(&self) -> Option<Arc<T>> {
         self.link.clone_inner()
