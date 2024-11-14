@@ -30,7 +30,7 @@ union Ptr<T> {
     ptr: *const T,
 }
 
-/// A wrapper of the pointer to the inner data
+/// A wrapper of the pointer to the inner Arc data
 struct LinkWrapper<T> {
     ptr: AtomicUsize,
     phantom: PhantomData<*const T>,
@@ -107,7 +107,7 @@ impl<T: fmt::Debug> fmt::Debug for LinkWrapper<T> {
 // RcuCell
 //---------------------------------------------------------------------------------------
 
-/// A RCU cell, it behaves like `RwLock<Option<T>>`
+/// RCU cell, it behaves like `RwLock<Option<Arc<T>>>`
 #[derive(Debug)]
 pub struct RcuCell<T> {
     link: LinkWrapper<T>,
@@ -129,14 +129,14 @@ impl<T> Default for RcuCell<T> {
 }
 
 impl<T> RcuCell<T> {
-    /// create an empty instance
+    /// create an empty rcu cell instance
     pub const fn none() -> Self {
         RcuCell {
             link: LinkWrapper::new(ptr::null()),
         }
     }
 
-    /// create from a value
+    /// create rcu cell from a value
     pub fn some(data: T) -> Self {
         let ptr = Arc::into_raw(Arc::new(data));
         RcuCell {
@@ -144,7 +144,7 @@ impl<T> RcuCell<T> {
         }
     }
 
-    /// create from an option
+    /// create rcu cell from value that can be converted to Option<T>
     pub fn new(data: impl Into<Option<T>>) -> Self {
         let data = data.into();
         match data {
