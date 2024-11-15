@@ -160,9 +160,9 @@ impl<T> RcuCell<T> {
     }
 
     #[inline]
-    fn inner_update(&self, data: Option<T>) -> Option<Arc<T>> {
+    fn inner_update(&self, data: Option<Arc<T>>) -> Option<Arc<T>> {
         let new_ptr = match data {
-            Some(data) => Arc::into_raw(Arc::new(data)),
+            Some(data) => Arc::into_raw(data),
             None => ptr::null_mut(),
         };
         self.link.update(new_ptr)
@@ -176,14 +176,16 @@ impl<T> RcuCell<T> {
 
     /// write a value to the rcu cell and return the old value
     #[inline]
-    pub fn write(&self, data: T) -> Option<Arc<T>> {
+    pub fn write(&self, data: impl Into<Arc<T>>) -> Option<Arc<T>> {
+        let data = data.into();
         self.inner_update(Some(data))
     }
 
     /// update the value with a closure and return the old value
-    pub fn update<F>(&self, f: F) -> Option<Arc<T>>
+    pub fn update<R, F>(&self, f: F) -> Option<Arc<T>>
     where
-        F: FnOnce(&T) -> T,
+        F: FnOnce(&T) -> R,
+        R: Into<Arc<T>>,
     {
         let v = self.read();
         let data = v.as_ref().map(|v| f(v))?;
