@@ -1,8 +1,9 @@
 #![doc = include_str!("../README.md")]
 #![no_std]
 
-extern crate alloc;
+pub mod epoch;
 
+extern crate alloc;
 use alloc::sync::Arc;
 
 use core::marker::PhantomData;
