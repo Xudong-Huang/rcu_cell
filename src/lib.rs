@@ -225,9 +225,6 @@ mod test {
 
     #[test]
     fn simple_drop() {
-        let ptr = Arc::into_raw(Arc::new(10));
-        let _a = unsafe { Arc::from_raw(ptr) };
-
         static REF: AtomicUsize = AtomicUsize::new(0);
         struct Foo(usize);
         impl Foo {

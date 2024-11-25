@@ -57,10 +57,10 @@ impl<T> RcuCell<T> {
         };
 
         let old = self.data.swap(new_ptr, Ordering::AcqRel, &guard);
-        let ptr = old.as_raw();
         if old.is_null() {
             None
         } else {
+            let ptr = old.as_raw();
             unsafe { guard.defer_destroy(old) };
             Some(RcuReader { _guard: guard, ptr })
         }
@@ -137,9 +137,6 @@ mod test {
 
     #[test]
     fn simple_drop() {
-        let ptr = Arc::into_raw(Arc::new(10));
-        let _a = unsafe { Arc::from_raw(ptr) };
-
         static REF: AtomicUsize = AtomicUsize::new(0);
         struct Foo(usize);
         impl Foo {

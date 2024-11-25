@@ -59,19 +59,26 @@ impl<T> RcuCell<T> {
             None => ptr::null_mut(),
         };
 
-        let old = self.data.swap(new_ptr, Ordering::AcqRel);
-        if old.is_null() {
-            None
-        } else {
+        loop {
             let guard = self.collector.enter();
-            // FIXME: how to proect the old to a RcuReader?
-            // Seems that the guard has nothing to do with the old
-            // guard.protect(old, Ordering::Acquire);
-            unsafe { self.collector.retire(old, reclaim::boxed::<Linked<T>>) };
-            Some(RcuReader {
-                _guard: guard,
-                ptr: old,
-            })
+            let old = guard.protect(&self.data, Ordering::Acquire);
+            if self
+                .data
+                .compare_exchange_weak(old, new_ptr, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                if old.is_null() {
+                    return None;
+                }
+
+                unsafe { self.collector.retire(old, reclaim::boxed::<Linked<T>>) };
+                return Some(RcuReader {
+                    _guard: guard,
+                    ptr: old,
+                });
+            } else {
+                core::hint::spin_loop();
+            }
         }
     }
 
@@ -146,9 +153,6 @@ mod test {
 
     #[test]
     fn simple_drop() {
-        let ptr = Arc::into_raw(Arc::new(10));
-        let _a = unsafe { Arc::from_raw(ptr) };
-
         static REF: AtomicUsize = AtomicUsize::new(0);
         struct Foo(usize);
         impl Foo {
