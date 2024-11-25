@@ -107,6 +107,13 @@ pub struct RcuReader<T> {
     ptr: *const T,
 }
 
+impl<T> RcuReader<T> {
+    /// returns true if the underlying ptr is the same one
+    pub fn ptr_eq(&self, other: &RcuReader<T>) -> bool {
+        self.ptr == other.ptr
+    }
+}
+
 impl<T> Deref for RcuReader<T> {
     type Target = T;
 
