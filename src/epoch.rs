@@ -1,4 +1,4 @@
-use core::{ops::Deref, sync::atomic::Ordering};
+use core::{cmp, fmt, ops::Deref, sync::atomic::Ordering};
 use crossbeam_epoch::{Atomic, Guard, Owned, Shared};
 
 pub struct RcuCell<T> {
@@ -101,17 +101,10 @@ impl<T> RcuCell<T> {
     }
 }
 
-#[derive(Debug)]
 pub struct RcuReader<T> {
     // hold the guard to ensure the data is valid
     _guard: Guard,
     ptr: *const T,
-}
-
-impl<T> PartialEq for RcuReader<T> {
-    fn eq(&self, other: &Self) -> bool {
-        self.ptr == other.ptr
-    }
 }
 
 impl<T> Deref for RcuReader<T> {
@@ -120,6 +113,60 @@ impl<T> Deref for RcuReader<T> {
     fn deref(&self) -> &Self::Target {
         // SAFETY: the guard ensures the data is valid
         unsafe { self.ptr.as_ref().unwrap() }
+    }
+}
+
+impl<T> AsRef<T> for RcuReader<T> {
+    fn as_ref(&self) -> &T {
+        self.deref()
+    }
+}
+
+impl<T: PartialEq> PartialEq for RcuReader<T> {
+    fn eq(&self, other: &RcuReader<T>) -> bool {
+        *(*self) == *(*other)
+    }
+}
+
+impl<T: PartialOrd> PartialOrd for RcuReader<T> {
+    fn partial_cmp(&self, other: &RcuReader<T>) -> Option<cmp::Ordering> {
+        (**self).partial_cmp(&**other)
+    }
+
+    fn lt(&self, other: &RcuReader<T>) -> bool {
+        *(*self) < *(*other)
+    }
+
+    fn le(&self, other: &RcuReader<T>) -> bool {
+        *(*self) <= *(*other)
+    }
+
+    fn gt(&self, other: &RcuReader<T>) -> bool {
+        *(*self) > *(*other)
+    }
+
+    fn ge(&self, other: &RcuReader<T>) -> bool {
+        *(*self) >= *(*other)
+    }
+}
+
+impl<T: Ord> Ord for RcuReader<T> {
+    fn cmp(&self, other: &RcuReader<T>) -> cmp::Ordering {
+        (**self).cmp(&**other)
+    }
+}
+
+impl<T: Eq> Eq for RcuReader<T> {}
+
+impl<T: fmt::Debug> fmt::Debug for RcuReader<T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Debug::fmt(&**self, f)
+    }
+}
+
+impl<T> fmt::Pointer for RcuReader<T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Pointer::fmt(&self.ptr, f)
     }
 }
 
