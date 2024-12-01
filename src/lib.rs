@@ -2,8 +2,8 @@
 #![no_std]
 
 pub mod epoch;
-pub mod seize;
 pub mod list;
+pub mod seize;
 
 extern crate alloc;
 use alloc::sync::Arc;

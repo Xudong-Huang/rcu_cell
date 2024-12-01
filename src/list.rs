@@ -7,7 +7,7 @@ use core::sync::atomic::Ordering;
 use crate::RcuCell;
 
 pub struct Node<T> {
-    version: AtomicUsize,
+    version: Arc<AtomicUsize>,
     next: Arc<RcuCell<Node<T>>>,
     prev: Weak<RcuCell<Node<T>>>, // use Weak to avoid reference cycles
     data: Arc<Option<T>>,         // use Arc to allow data clone
@@ -16,7 +16,7 @@ pub struct Node<T> {
 impl<T> Node<T> {
     fn clone_from_arc_entry(entry: &Arc<Node<T>>) -> Self {
         Self {
-            version: AtomicUsize::new(0),
+            version: Arc::new(AtomicUsize::new(0)),
             prev: entry.prev.clone(),
             next: entry.next.clone(),
             data: entry.data.clone(),
@@ -63,19 +63,27 @@ impl<T> Entry<T> {
         }
     }
 
-    /// remove the node before the current node
-    pub fn remove_ahead(&self) -> Option<Entry<T>> {
-        self.as_impl().remove_ahead().map(|node| Entry { node })
-    }
-
-    /// remove the node after the current node
-    pub fn remove_after(&self) -> Option<Entry<T>> {
-        self.as_impl().remove_after().map(|node| Entry { node })
-    }
-
     /// remove the node from the list
     pub fn remove(self) {
-        // self.node.read().unwrap().unlock();
+        let prev_node = self.as_impl().lock_prev_node();
+        let curr = self.node.read().unwrap().clone();
+        let prev = curr.prev.upgrade().unwrap();
+        let next = curr.next.read().unwrap().clone();
+        curr.lock();
+        prev.write(Node {
+            version: prev_node.version.clone(),
+            prev: prev_node.prev.clone(),
+            next: curr.next.clone(),
+            data: prev_node.data.clone(),
+        });
+        curr.next.write(Node {
+            version: next.version.clone(),
+            prev: curr.prev.clone(),
+            next: next.next.clone(),
+            data: next.data.clone(),
+        });
+        curr.unlock();
+        prev_node.unlock();
     }
 }
 
@@ -85,7 +93,6 @@ impl<'a, T> EntryImpl<'a, T> {
     /// lock the prev node
     fn lock_prev_node(&self) -> Arc<Node<T>> {
         loop {
-            let prev = self.0.upgrade().unwrap();
             let prev = self.0.read().unwrap();
             prev.lock();
             if !Arc::ptr_eq(&self.0, &prev.next) {
@@ -97,13 +104,12 @@ impl<'a, T> EntryImpl<'a, T> {
         }
     }
 
-
     /// insert a node after the current node
     fn insert_after(&self, data: T) -> Arc<RcuCell<Node<T>>> {
         // first lock the current node
         let prev = self.lock_prev_node();
         let new_entry = Arc::new(RcuCell::new(Node {
-            version: AtomicUsize::new(0),
+            version: Arc::new(AtomicUsize::new(0)),
             prev: Arc::downgrade(&self.0),
             next: prev.next.clone(),
             data: Arc::new(Some(data)),
@@ -119,24 +125,69 @@ impl<'a, T> EntryImpl<'a, T> {
 
     /// insert a node before the current node
     fn insert_ahead(&self, data: T) -> Arc<RcuCell<Node<T>>> {
-         // first lock the current node
-         let prev = self.lock_prev_node();
-         let new_entry = Arc::new(RcuCell::new(Node {
-            version: AtomicUsize::new(0),
+        // first lock the current node
+        let prev = self.lock_prev_node();
+        let new_entry = Arc::new(RcuCell::new(Node {
+            version: Arc::new(AtomicUsize::new(0)),
             prev: Arc::downgrade(&self.0),
             next: prev.next.clone(),
             data: Arc::new(Some(data)),
         }));
+
+        todo!()
     }
 
+
     /// remove the node before the current node
-    fn remove_ahead(&self) -> Option<Arc<RcuCell<Node<T>>>> {
-        todo!()
+    /// this could invalidate the prev Entry!!
+    fn remove_ahead(&self, head: &Arc<RcuCell<Node<T>>>) -> Option<Arc<RcuCell<Node<T>>>> {
+        // self.0 is the next node
+        loop {
+            let curr = self.lock_prev_node();
+            let prev = match curr.prev.upgrade() {
+                None => {
+                    // this is the head
+                    curr.unlock();
+                    return None;
+                }
+                // the prev can change due to prev insert/remove
+                Some(prev) => prev,
+            };
+            // there could be dead lock, we must first lock prev
+            curr.unlock();
+            let prev = prev.read().unwrap();
+            prev.lock();
+        }
     }
 
     /// remove the node after the current node
-    fn remove_after(&self) -> Option<Arc<RcuCell<Node<T>>>> {
-        todo!()
+    fn remove_after(&self, tail: &Arc<RcuCell<Node<T>>>) -> Option<Arc<RcuCell<Node<T>>>> {
+        // self.0 is the prev node
+        let prev = self.0.read().unwrap();
+        prev.lock();
+        if Arc::ptr_eq(&prev.next, tail) {
+            prev.unlock();
+            return None;
+        }
+        let curr = prev.next.read().unwrap();
+        curr.lock();
+        let ret = prev.next.clone();
+        self.0.write(Node {
+            version: prev.version.clone(),
+            prev: prev.prev.clone(),
+            next: curr.next.clone(),
+            data: prev.data.clone(),
+        });
+        let next = curr.next.read().unwrap();
+        curr.next.write(Node {
+            version: next.version.clone(),
+            prev: curr.prev.clone(),
+            next: next.next.clone(),
+            data: next.data.clone(),
+        });
+        curr.unlock();
+        prev.unlock();
+        Some(ret)
     }
 }
 
@@ -177,7 +228,7 @@ impl<T> Drop for LinkedList<T> {
 impl<T> LinkedList<T> {
     pub fn new() -> Self {
         let tail = Arc::new(RcuCell::new(Node {
-            version: AtomicUsize::new(0),
+            version: Arc::new(AtomicUsize::new(0)),
             prev: Weak::new(),
             next: Arc::new(RcuCell::none()),
             // this is only used for list head, should never access
@@ -185,7 +236,7 @@ impl<T> LinkedList<T> {
         }));
 
         let head = Arc::new(RcuCell::new(Node {
-            version: AtomicUsize::new(0),
+            version: Arc::new(AtomicUsize::new(0)),
             prev: Weak::new(),
             next: tail.clone(),
             // this is only used for list head, should never access
@@ -226,7 +277,7 @@ impl<T> LinkedList<T> {
     pub fn pop_back(&mut self) -> Option<EntryRef<T>> {
         let entry = EntryImpl(&self.tail);
         entry
-            .remove_ahead()
+            .remove_ahead(&self.head)
             .and_then(|node| node.read().map(EntryRef))
     }
 
@@ -239,7 +290,7 @@ impl<T> LinkedList<T> {
     pub fn pop_front(&mut self) -> Option<EntryRef<T>> {
         let entry = EntryImpl(&self.head);
         entry
-            .remove_after()
+            .remove_after(&self.tail)
             .and_then(|node| node.read().map(EntryRef))
     }
 
