@@ -146,6 +146,15 @@ impl<T> Default for RcuCell<T> {
     }
 }
 
+impl<T> From<Arc<T>> for RcuCell<T> {
+    fn from(data: Arc<T>) -> Self {
+        let data = ManuallyDrop::new(data);
+        RcuCell {
+            link: LinkWrapper::new(Arc::as_ptr(&data)),
+        }
+    }
+}
+
 impl<T> RcuCell<T> {
     /// create an empty rcu cell instance
     pub const fn none() -> Self {
@@ -357,8 +366,7 @@ mod test {
         assert!(t.arc_eq(&v));
         t.write(11);
         assert!(!t.arc_eq(&v));
-        let t1 = RcuCell::none();
-        t1.write(v.clone());
+        let t1 = RcuCell::from(v.clone());
         assert!(t1.arc_eq(&v));
         t.write(v);
         assert!(RcuCell::ptr_eq(&t, &t1))
