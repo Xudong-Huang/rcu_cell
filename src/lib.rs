@@ -93,6 +93,13 @@ impl<T> LinkWrapper<T> {
     }
 
     #[inline]
+    fn get_ref(&self) -> *const T {
+        let addr = self.ptr.load(Ordering::Relaxed);
+        let addr = (addr & !REFCOUNT_MASK) >> LEADING_BITS;
+        unsafe { Ptr { addr }.ptr }
+    }
+
+    #[inline]
     fn dec_ref(&self) {
         self.ptr.fetch_sub(1, Ordering::Release);
     }
@@ -179,7 +186,7 @@ impl<T> RcuCell<T> {
         self.link.update(new_ptr)
     }
 
-    /// take the value from the rcu cell
+    /// take the value from the rcu cell, leave the rcu cell empty
     #[inline]
     pub fn take(&self) -> Option<Arc<T>> {
         self.inner_update(None)
@@ -207,6 +214,16 @@ impl<T> RcuCell<T> {
     #[inline]
     pub fn read(&self) -> Option<Arc<T>> {
         self.link.clone_inner()
+    }
+
+    /// read inner ptr and check if it is the same as the given Arc
+    pub fn arc_eq(&self, data: &Arc<T>) -> bool {
+        self.link.get_ref() == Arc::as_ptr(data)
+    }
+
+    /// check if two RcuCell instances point to the same inner Arc
+    pub fn ptr_eq(this: &Self, other: &Self) -> bool {
+        this.link.get_ref() == other.link.get_ref()
     }
 }
 
@@ -331,5 +348,19 @@ mod test {
         assert!(d2.is_none());
         let d3 = t2.read().unwrap();
         assert_eq!(*d3, 42);
+    }
+
+    #[test]
+    fn test_arc_eq() {
+        let t = RcuCell::new(10);
+        let v = t.read().unwrap();
+        assert!(t.arc_eq(&v));
+        t.write(11);
+        assert!(!t.arc_eq(&v));
+        let t1 = RcuCell::none();
+        t1.write(v.clone());
+        assert!(t1.arc_eq(&v));
+        t.write(v);
+        assert!(RcuCell::ptr_eq(&t, &t1))
     }
 }
