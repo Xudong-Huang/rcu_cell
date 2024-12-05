@@ -10,18 +10,16 @@ use core::mem::ManuallyDrop;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use core::{fmt, ptr};
 
-#[cfg(target_pointer_width = "64")]
+// we only support 64-bit platform
+const _: () = assert!(usize::MAX.count_ones() == 64);
 const LEADING_BITS: usize = 8;
-#[cfg(target_pointer_width = "64")]
 const ALIGN_BITS: usize = 3;
-#[cfg(not(target_pointer_width = "64"))]
-const LEADING_BITS: usize = 0;
-#[cfg(not(target_pointer_width = "64"))]
-const ALIGN_BITS: usize = 2;
 
 const LOWER_MASK: usize = (1 << ALIGN_BITS) - 1;
 const HIGHER_MASK: usize = !((1 << (usize::MAX.leading_ones() as usize - LEADING_BITS)) - 1);
 const REFCOUNT_MASK: usize = (1 << (LEADING_BITS + ALIGN_BITS)) - 1;
+const UPDTATE_MASK: usize = 1 << (LEADING_BITS + ALIGN_BITS - 1);
+const UPDATE_REF_MASK: usize = REFCOUNT_MASK & !UPDTATE_MASK;
 
 //---------------------------------------------------------------------------------------
 // LinkWrapper
@@ -52,16 +50,15 @@ impl<T> LinkWrapper<T> {
     }
 
     fn update(&self, ptr: *const T) -> Option<Arc<T>> {
+        use Ordering::*;
         let addr = unsafe { Ptr { ptr }.addr };
         debug_assert!(addr & LOWER_MASK == 0);
         debug_assert!(addr & HIGHER_MASK == 0);
         let new = addr << LEADING_BITS;
-        let mut old = self.ptr.load(Ordering::Relaxed) & !REFCOUNT_MASK;
+        let mut old = self.ptr.load(Relaxed) & !REFCOUNT_MASK;
 
-        while let Err(addr) =
-            self.ptr
-                .compare_exchange_weak(old, new, Ordering::Acquire, Ordering::Relaxed)
-        {
+        // wait all reader release
+        while let Err(addr) = self.ptr.compare_exchange_weak(old, new, Acquire, Relaxed) {
             old = addr & !REFCOUNT_MASK;
             core::hint::spin_loop();
         }
@@ -75,23 +72,22 @@ impl<T> LinkWrapper<T> {
 
     // this is only used after lock_read
     fn unlock_update(&self, ptr: *const T) -> Option<Arc<T>> {
+        use Ordering::*;
         let addr = unsafe { Ptr { ptr }.addr };
         debug_assert!(addr & LOWER_MASK == 0);
         debug_assert!(addr & HIGHER_MASK == 0);
         let new = addr << LEADING_BITS;
-        let mut old = self.ptr.load(Ordering::Relaxed) & !REFCOUNT_MASK | 1;
+        let mut old = self.ptr.load(Relaxed) & !UPDATE_REF_MASK | UPDTATE_MASK;
 
-        while let Err(addr) =
-            self.ptr
-                .compare_exchange_weak(old, new, Ordering::Acquire, Ordering::Relaxed)
-        {
-            old = addr & !REFCOUNT_MASK | 1;
+        // wait all reader release
+        while let Err(addr) = self.ptr.compare_exchange_weak(old, new, Acquire, Relaxed) {
+            old = addr & !UPDATE_REF_MASK | UPDTATE_MASK;
             core::hint::spin_loop();
         }
 
-        debug_assert!(old & LOWER_MASK == 1);
+        debug_assert!(old & LOWER_MASK == 0);
         debug_assert!(old & HIGHER_MASK == 0);
-        let addr = (old & !1) >> LEADING_BITS;
+        let addr = (old & !UPDTATE_MASK) >> LEADING_BITS;
         let ptr = unsafe { Ptr { addr }.ptr };
         Self::ptr_to_arc(ptr)
     }
@@ -137,11 +133,28 @@ impl<T> LinkWrapper<T> {
     }
 
     // read the inner Arc and increase the ref count
-    // to prevet the writer to update the inner Arc
+    // to prevet other writer to update the inner Arc
     // should be paired used with unlock_update
     #[inline]
     fn lock_read(&self) -> Option<Arc<T>> {
-        let ptr = self.inc_ref();
+        let addr = self.ptr.load(Ordering::Relaxed);
+        let mut old = addr & !UPDTATE_MASK; // clear the update flag
+        let mut new = addr | UPDTATE_MASK; // set the update flag
+
+        let refs = old & UPDATE_REF_MASK;
+        assert!(refs < UPDATE_REF_MASK, "Too many references");
+
+        while let Err(addr) =
+            self.ptr
+                .compare_exchange_weak(old, new, Ordering::Acquire, Ordering::Relaxed)
+        {
+            old = addr & !UPDTATE_MASK;
+            new = addr | UPDTATE_MASK;
+            core::hint::spin_loop();
+        }
+
+        let addr = (old & !REFCOUNT_MASK) >> LEADING_BITS;
+        let ptr = unsafe { Ptr { addr }.ptr };
         let ret = Self::ptr_to_arc(ptr);
         let _ = ManuallyDrop::new(ret.clone());
         ret
