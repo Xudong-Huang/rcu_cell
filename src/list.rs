@@ -311,14 +311,7 @@ impl<T> Drop for LinkedList<T> {
 
 impl<T> LinkedList<T> {
     pub fn new() -> Self {
-        let tail = Arc::new(RcuCell::new(Node {
-            version: Arc::new(AtomicUsize::new(0)),
-            prev: Weak::new(),
-            next: Arc::new(RcuCell::none()),
-            // this is only used for list head, should never access
-            data: Arc::new(None),
-        }));
-
+        let tail = Arc::new(RcuCell::none());
         let head = Arc::new(RcuCell::new(Node {
             version: Arc::new(AtomicUsize::new(0)),
             prev: Weak::new(),
@@ -333,6 +326,10 @@ impl<T> LinkedList<T> {
         tail.write(tail_entry);
 
         Self { head, tail }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        Arc::ptr_eq(&self.head, &self.tail)
     }
 
     pub fn front(&self) -> Option<EntryRef<T>> {
