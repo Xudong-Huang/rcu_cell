@@ -73,6 +73,29 @@ impl<T> LinkWrapper<T> {
         Self::ptr_to_arc(ptr)
     }
 
+    // this is only used after lock_read
+    fn unlock_update(&self, ptr: *const T) -> Option<Arc<T>> {
+        let addr = unsafe { Ptr { ptr }.addr };
+        debug_assert!(addr & LOWER_MASK == 0);
+        debug_assert!(addr & HIGHER_MASK == 0);
+        let new = addr << LEADING_BITS;
+        let mut old = self.ptr.load(Ordering::Relaxed) & !REFCOUNT_MASK | 1;
+
+        while let Err(addr) =
+            self.ptr
+                .compare_exchange_weak(old, new, Ordering::Acquire, Ordering::Relaxed)
+        {
+            old = addr & !REFCOUNT_MASK | 1;
+            core::hint::spin_loop();
+        }
+
+        debug_assert!(old & LOWER_MASK == 1);
+        debug_assert!(old & HIGHER_MASK == 0);
+        let addr = (old & !1) >> LEADING_BITS;
+        let ptr = unsafe { Ptr { addr }.ptr };
+        Self::ptr_to_arc(ptr)
+    }
+
     #[inline]
     fn is_none(&self) -> bool {
         self.ptr.load(Ordering::Relaxed) & !REFCOUNT_MASK == 0
@@ -110,6 +133,17 @@ impl<T> LinkWrapper<T> {
         let ret = Self::ptr_to_arc(ptr);
         let _ = ManuallyDrop::new(ret.clone());
         self.dec_ref();
+        ret
+    }
+
+    // read the inner Arc and increase the ref count
+    // to prevet the writer to update the inner Arc
+    // should be paired used with unlock_update
+    #[inline]
+    fn lock_read(&self) -> Option<Arc<T>> {
+        let ptr = self.inc_ref();
+        let ret = Self::ptr_to_arc(ptr);
+        let _ = ManuallyDrop::new(ret.clone());
         ret
     }
 }
@@ -208,15 +242,21 @@ impl<T> RcuCell<T> {
         self.inner_update(Some(data))
     }
 
-    /// update the value with a closure and return the old value
+    /// atomicly update the value with a closure and return the old value
+    /// the closure will be called with a reference to the old value
+    /// the closure should not take too long time
     pub fn update<R, F>(&self, f: F) -> Option<Arc<T>>
     where
-        F: FnOnce(&T) -> R,
+        F: FnOnce(Option<Arc<T>>) -> Option<R>,
         R: Into<Arc<T>>,
     {
-        let v = self.read();
-        let data = v.as_ref().map(|v| f(v))?;
-        self.write(data)
+        // increase ref count to lock the inner Arc
+        let v = self.link.lock_read();
+        let new_ptr = match f(v) {
+            Some(data) => Arc::into_raw(data.into()),
+            None => ptr::null_mut(),
+        };
+        self.link.unlock_update(new_ptr)
     }
 
     /// read out the inner Arc value
@@ -301,8 +341,15 @@ mod test {
     #[test]
     fn test_rcu_update() {
         let t = RcuCell::new(Some(10));
-        t.update(|v| v + 1);
+        let old = t.update(|v| v.map(|x| *x + 1));
         assert_eq!(t.read().map(|v| *v), Some(11));
+        assert_eq!(old.map(|v| *v), Some(10));
+        let old = t.update(|v| match v {
+            Some(x) if *x == 11 => None,
+            _ => Some(42),
+        });
+        assert!(t.read().is_none());
+        assert_eq!(old.map(|v| *v), Some(11));
     }
 
     #[test]
