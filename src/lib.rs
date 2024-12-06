@@ -202,6 +202,20 @@ impl<T> From<Arc<T>> for RcuCell<T> {
     }
 }
 
+impl<T> From<Option<Arc<T>>> for RcuCell<T> {
+    fn from(data: Option<Arc<T>>) -> Self {
+        match data {
+            Some(data) => {
+                let data = ManuallyDrop::new(data);
+                RcuCell {
+                    link: LinkWrapper::new(Arc::as_ptr(&data)),
+                }
+            }
+            None => RcuCell::none(),
+        }
+    }
+}
+
 impl<T> RcuCell<T> {
     /// create an empty rcu cell instance
     pub const fn none() -> Self {
@@ -428,7 +442,9 @@ mod test {
         assert!(!t.arc_eq(&v));
         let t1 = RcuCell::from(v.clone());
         assert!(t1.arc_eq(&v));
-        t.write(v);
-        assert!(RcuCell::ptr_eq(&t, &t1))
+        let v2 = t.write(v);
+        let t2 = RcuCell::from(v2.clone());
+        assert!(RcuCell::ptr_eq(&t, &t1));
+        assert!(t2.arc_eq(v2.as_ref().unwrap()));
     }
 }
