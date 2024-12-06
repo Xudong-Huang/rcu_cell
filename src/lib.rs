@@ -7,6 +7,7 @@ use alloc::sync::Arc;
 
 use core::marker::PhantomData;
 use core::mem::ManuallyDrop;
+use core::ops::Deref;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use core::{fmt, ptr};
 
@@ -241,14 +242,23 @@ impl<T> RcuCell<T> {
         }
     }
 
+    /// convert the rcu cell to an Arc value
+    pub fn into_arc(self) -> Option<Arc<T>> {
+        let ptr = self.link.get_ref();
+        let ret = LinkWrapper::ptr_to_arc(ptr);
+        let _ = ManuallyDrop::new(self);
+        ret
+    }
+
     /// check if the rcu cell is empty
     #[inline]
     pub fn is_none(&self) -> bool {
         self.link.is_none()
     }
 
+    /// write an option arc value to the rcu cell and return the old value
     #[inline]
-    fn inner_update(&self, data: Option<Arc<T>>) -> Option<Arc<T>> {
+    pub fn set(&self, data: Option<Arc<T>>) -> Option<Arc<T>> {
         let new_ptr = match data {
             Some(data) => Arc::into_raw(data),
             None => ptr::null_mut(),
@@ -259,14 +269,14 @@ impl<T> RcuCell<T> {
     /// take the value from the rcu cell, leave the rcu cell empty
     #[inline]
     pub fn take(&self) -> Option<Arc<T>> {
-        self.inner_update(None)
+        self.set(None)
     }
 
     /// write a value to the rcu cell and return the old value
     #[inline]
     pub fn write(&self, data: impl Into<Arc<T>>) -> Option<Arc<T>> {
         let data = data.into();
-        self.inner_update(Some(data))
+        self.set(Some(data))
     }
 
     /// atomicly update the value with a closure and return the old value
