@@ -7,7 +7,6 @@ use alloc::sync::Arc;
 
 use core::marker::PhantomData;
 use core::mem::ManuallyDrop;
-use core::ops::Deref;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use core::{fmt, ptr};
 
@@ -58,10 +57,11 @@ impl<T> LinkWrapper<T> {
         let new = addr << LEADING_BITS;
         let mut old = self.ptr.load(Relaxed) & !REFCOUNT_MASK;
 
+        let backoff = crossbeam_utils::Backoff::new();
         // wait all reader release
         while let Err(addr) = self.ptr.compare_exchange_weak(old, new, Acquire, Relaxed) {
             old = addr & !REFCOUNT_MASK;
-            core::hint::spin_loop();
+            backoff.snooze();
         }
 
         debug_assert!(old & LOWER_MASK == 0);
@@ -80,10 +80,11 @@ impl<T> LinkWrapper<T> {
         let new = addr << LEADING_BITS;
         let mut old = self.ptr.load(Relaxed) & !UPDATE_REF_MASK | UPDTATE_MASK;
 
+        let backoff = crossbeam_utils::Backoff::new();
         // wait all reader release
         while let Err(addr) = self.ptr.compare_exchange_weak(old, new, Acquire, Relaxed) {
             old = addr & !UPDATE_REF_MASK | UPDTATE_MASK;
-            core::hint::spin_loop();
+            backoff.snooze();
         }
 
         debug_assert!(old & LOWER_MASK == 0);
@@ -145,13 +146,14 @@ impl<T> LinkWrapper<T> {
         let refs = old & UPDATE_REF_MASK;
         assert!(refs < UPDATE_REF_MASK, "Too many references");
 
+        let backoff = crossbeam_utils::Backoff::new();
         while let Err(addr) =
             self.ptr
                 .compare_exchange_weak(old, new, Ordering::Acquire, Ordering::Relaxed)
         {
             old = addr & !UPDTATE_MASK;
             new = addr | UPDTATE_MASK;
-            core::hint::spin_loop();
+            backoff.snooze();
         }
 
         let addr = (old & !REFCOUNT_MASK) >> LEADING_BITS;
