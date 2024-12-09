@@ -281,9 +281,10 @@ impl<T> RcuCell<T> {
         self.set(Some(data))
     }
 
-    /// atomicly update the value with a closure and return the old value
-    /// the closure will be called with a reference to the old value
-    /// the closure should not take too long time
+    /// Atomicly update the value with a closure and return the old value.
+    /// The closure will be called with the old value and return the new value.
+    /// The closure should not take too long time, internally it's use a spin
+    /// lock to prevent other writer to update the value
     pub fn update<R, F>(&self, f: F) -> Option<Arc<T>>
     where
         F: FnOnce(Option<Arc<T>>) -> Option<R>,
