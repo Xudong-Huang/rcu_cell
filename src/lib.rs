@@ -12,6 +12,8 @@ use core::{fmt, ptr};
 
 // we only support 64-bit platform
 const _: () = assert!(usize::MAX.count_ones() == 64);
+const _: () = assert!(core::mem::size_of::<*const ()>() == 8);
+
 const LEADING_BITS: usize = 8;
 const ALIGN_BITS: usize = 3;
 
@@ -31,6 +33,18 @@ union Ptr<T> {
     ptr: *const T,
 }
 
+impl<T> Ptr<T> {
+    #[inline]
+    const fn addr(self) -> usize {
+        unsafe { self.addr }
+    }
+
+    #[inline]
+    const fn ptr(self) -> *const T {
+        unsafe { self.ptr }
+    }
+}
+
 /// A wrapper of the pointer to the inner Arc data
 struct LinkWrapper<T> {
     ptr: AtomicUsize,
@@ -40,7 +54,7 @@ struct LinkWrapper<T> {
 impl<T> LinkWrapper<T> {
     #[inline]
     const fn new(ptr: *const T) -> Self {
-        let addr: usize = unsafe { Ptr { ptr }.addr };
+        let addr = Ptr { ptr }.addr();
         debug_assert!(addr & LOWER_MASK == 0);
         debug_assert!(addr & HIGHER_MASK == 0);
         LinkWrapper {
@@ -51,7 +65,7 @@ impl<T> LinkWrapper<T> {
 
     fn update(&self, ptr: *const T) -> Option<Arc<T>> {
         use Ordering::*;
-        let addr = unsafe { Ptr { ptr }.addr };
+        let addr = Ptr { ptr }.addr();
         debug_assert!(addr & LOWER_MASK == 0);
         debug_assert!(addr & HIGHER_MASK == 0);
         let new = addr << LEADING_BITS;
@@ -59,22 +73,20 @@ impl<T> LinkWrapper<T> {
 
         let backoff = crossbeam_utils::Backoff::new();
         // wait all reader release
-        while let Err(addr) = self.ptr.compare_exchange_weak(old, new, Acquire, Relaxed) {
+        while let Err(addr) = self.ptr.compare_exchange_weak(old, new, Release, Relaxed) {
             old = addr & !REFCOUNT_MASK;
             backoff.snooze();
         }
 
-        debug_assert!(old & LOWER_MASK == 0);
-        debug_assert!(old & HIGHER_MASK == 0);
         let addr = old >> LEADING_BITS;
-        let ptr = unsafe { Ptr { addr }.ptr };
+        let ptr = Ptr { addr }.ptr();
         Self::ptr_to_arc(ptr)
     }
 
     // this is only used after lock_read
     fn unlock_update(&self, ptr: *const T) -> Option<Arc<T>> {
         use Ordering::*;
-        let addr = unsafe { Ptr { ptr }.addr };
+        let addr = Ptr { ptr }.addr();
         debug_assert!(addr & LOWER_MASK == 0);
         debug_assert!(addr & HIGHER_MASK == 0);
         let new = addr << LEADING_BITS;
@@ -82,15 +94,13 @@ impl<T> LinkWrapper<T> {
 
         let backoff = crossbeam_utils::Backoff::new();
         // wait all reader release
-        while let Err(addr) = self.ptr.compare_exchange_weak(old, new, Acquire, Relaxed) {
+        while let Err(addr) = self.ptr.compare_exchange_weak(old, new, Release, Relaxed) {
             old = addr & !UPDATE_REF_MASK | UPDTATE_MASK;
             backoff.snooze();
         }
 
-        debug_assert!(old & LOWER_MASK == 0);
-        debug_assert!(old & HIGHER_MASK == 0);
         let addr = (old & !UPDTATE_MASK) >> LEADING_BITS;
-        let ptr = unsafe { Ptr { addr }.ptr };
+        let ptr = Ptr { addr }.ptr();
         Self::ptr_to_arc(ptr)
     }
 
@@ -110,14 +120,14 @@ impl<T> LinkWrapper<T> {
         let refs = addr & REFCOUNT_MASK;
         assert!(refs < REFCOUNT_MASK, "Too many references");
         let addr = (addr & !REFCOUNT_MASK) >> LEADING_BITS;
-        unsafe { Ptr { addr }.ptr }
+        Ptr { addr }.ptr()
     }
 
     #[inline]
     fn get_ref(&self) -> *const T {
-        let addr = self.ptr.load(Ordering::Relaxed);
+        let addr = self.ptr.load(Ordering::Acquire);
         let addr = (addr & !REFCOUNT_MASK) >> LEADING_BITS;
-        unsafe { Ptr { addr }.ptr }
+        Ptr { addr }.ptr()
     }
 
     #[inline]
@@ -128,10 +138,10 @@ impl<T> LinkWrapper<T> {
     #[inline]
     fn clone_inner(&self) -> Option<Arc<T>> {
         let ptr = self.inc_ref();
-        let ret = Self::ptr_to_arc(ptr);
-        let _ = ManuallyDrop::new(ret.clone());
+        let v = ManuallyDrop::new(Self::ptr_to_arc(ptr));
+        let cloned = v.as_ref().cloned();
         self.dec_ref();
-        ret
+        cloned
     }
 
     // read the inner Arc and increase the ref count
@@ -157,7 +167,7 @@ impl<T> LinkWrapper<T> {
         }
 
         let addr = (old & !REFCOUNT_MASK) >> LEADING_BITS;
-        let ptr = unsafe { Ptr { addr }.ptr };
+        let ptr = Ptr { addr }.ptr();
         let ret = Self::ptr_to_arc(ptr);
         let _ = ManuallyDrop::new(ret.clone());
         ret
@@ -186,7 +196,8 @@ unsafe impl<T: Send + Sync> Sync for RcuCell<T> {}
 
 impl<T> Drop for RcuCell<T> {
     fn drop(&mut self) {
-        self.take();
+        let ptr = self.link.get_ref();
+        let _ = LinkWrapper::ptr_to_arc(ptr);
     }
 }
 
@@ -329,9 +340,6 @@ mod test {
 
     #[test]
     fn simple_drop() {
-        let ptr = Arc::into_raw(Arc::new(10));
-        let _a = unsafe { Arc::from_raw(ptr) };
-
         static REF: AtomicUsize = AtomicUsize::new(0);
         struct Foo(usize);
         impl Foo {
