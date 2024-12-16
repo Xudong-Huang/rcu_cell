@@ -100,6 +100,7 @@ impl<T> LinkWrapper<T> {
             backoff.snooze();
         }
 
+        core::sync::atomic::fence(Ordering::Acquire);
         let addr = (old & !UPDTATE_MASK) >> LEADING_BITS;
         let ptr = Ptr { addr }.ptr();
         Self::ptr_to_arc(ptr)
