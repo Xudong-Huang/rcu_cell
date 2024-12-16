@@ -78,6 +78,7 @@ impl<T> LinkWrapper<T> {
             backoff.snooze();
         }
 
+        core::sync::atomic::fence(Ordering::Acquire);
         let addr = old >> LEADING_BITS;
         let ptr = Ptr { addr }.ptr();
         Self::ptr_to_arc(ptr)
@@ -116,7 +117,7 @@ impl<T> LinkWrapper<T> {
 
     #[inline]
     fn inc_ref(&self) -> *const T {
-        let addr = self.ptr.fetch_add(1, Ordering::Release);
+        let addr = self.ptr.fetch_add(1, Ordering::Acquire);
         let refs = addr & REFCOUNT_MASK;
         assert!(refs < REFCOUNT_MASK, "Too many references");
         let addr = (addr & !REFCOUNT_MASK) >> LEADING_BITS;
@@ -141,6 +142,7 @@ impl<T> LinkWrapper<T> {
         let v = ManuallyDrop::new(Self::ptr_to_arc(ptr));
         let cloned = v.as_ref().cloned();
         self.dec_ref();
+        core::sync::atomic::fence(Ordering::Acquire);
         cloned
     }
 
@@ -149,7 +151,9 @@ impl<T> LinkWrapper<T> {
     // should be paired used with unlock_update
     #[inline]
     fn lock_read(&self) -> Option<Arc<T>> {
-        let addr = self.ptr.load(Ordering::Relaxed);
+        use Ordering::*;
+
+        let addr = self.ptr.load(Relaxed);
         let mut old = addr & !UPDTATE_MASK; // clear the update flag
         let mut new = addr | UPDTATE_MASK; // set the update flag
 
@@ -157,14 +161,13 @@ impl<T> LinkWrapper<T> {
         assert!(refs < UPDATE_REF_MASK, "Too many references");
 
         let backoff = crossbeam_utils::Backoff::new();
-        while let Err(addr) =
-            self.ptr
-                .compare_exchange_weak(old, new, Ordering::Acquire, Ordering::Relaxed)
-        {
+        while let Err(addr) = self.ptr.compare_exchange_weak(old, new, Release, Relaxed) {
             old = addr & !UPDTATE_MASK;
             new = addr | UPDTATE_MASK;
             backoff.snooze();
         }
+
+        core::sync::atomic::fence(Ordering::Acquire);
 
         let addr = (old & !REFCOUNT_MASK) >> LEADING_BITS;
         let ptr = Ptr { addr }.ptr();
