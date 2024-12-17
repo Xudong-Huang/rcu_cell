@@ -3,10 +3,16 @@ use core::mem::ManuallyDrop;
 use core::ptr;
 use core::sync::atomic::Ordering;
 
-use crate::link::{ptr_to_weak, LinkWrapper};
-//---------------------------------------------------------------------------------------
-// RcuWeak
-//---------------------------------------------------------------------------------------
+use crate::link::LinkWrapper;
+
+#[inline]
+fn ptr_to_weak<T>(ptr: *const T) -> Weak<T> {
+    if ptr.is_null() {
+        Weak::new()
+    } else {
+        unsafe { Weak::from_raw(ptr) }
+    }
+}
 
 /// RCU weak cell, it behaves like `RwLock<Weak<T>>`
 #[derive(Debug)]
@@ -46,6 +52,15 @@ impl<T> RcuWeak<T> {
         RcuWeak {
             link: LinkWrapper::new(ptr::null()),
         }
+    }
+
+    /// convert the rcu weak to a `Weak`` value
+    #[inline]
+    pub fn into_weak(self) -> Weak<T> {
+        let ptr = self.link.get_ref();
+        let ret = ptr_to_weak(ptr);
+        let _ = ManuallyDrop::new(self);
+        ret
     }
 
     /// write a new weak value to the rcu weak cell and return the old value

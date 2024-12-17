@@ -1,4 +1,3 @@
-use alloc::sync::{Arc, Weak};
 use core::fmt;
 use core::marker::PhantomData;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -11,10 +10,6 @@ const HIGHER_MASK: usize = !((1 << (usize::MAX.leading_ones() as usize - LEADING
 const REFCOUNT_MASK: usize = (1 << (LEADING_BITS + ALIGN_BITS)) - 1;
 const UPDTATE_MASK: usize = 1 << (LEADING_BITS + ALIGN_BITS - 1);
 const UPDATE_REF_MASK: usize = REFCOUNT_MASK & !UPDTATE_MASK;
-
-//---------------------------------------------------------------------------------------
-// LinkWrapper
-//---------------------------------------------------------------------------------------
 
 #[repr(C)]
 union Ptr<T> {
@@ -151,19 +146,5 @@ impl<T: fmt::Debug> fmt::Debug for LinkWrapper<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let ptr = self.get_ref();
         f.debug_struct("Link").field("ptr", &ptr).finish()
-    }
-}
-
-#[inline]
-pub(crate) fn ptr_to_arc<T>(ptr: *const T) -> Option<Arc<T>> {
-    (!ptr.is_null()).then(|| unsafe { Arc::from_raw(ptr) })
-}
-
-#[inline]
-pub(crate) fn ptr_to_weak<T>(ptr: *const T) -> Weak<T> {
-    if ptr.is_null() {
-        Weak::new()
-    } else {
-        unsafe { Weak::from_raw(ptr) }
     }
 }

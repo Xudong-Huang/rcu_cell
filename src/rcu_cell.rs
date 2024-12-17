@@ -3,11 +3,12 @@ use core::mem::ManuallyDrop;
 use core::ptr;
 use core::sync::atomic::Ordering;
 
-use crate::link::{ptr_to_arc, LinkWrapper};
+use crate::link::LinkWrapper;
 
-//---------------------------------------------------------------------------------------
-// RcuCell
-//---------------------------------------------------------------------------------------
+#[inline]
+fn ptr_to_arc<T>(ptr: *const T) -> Option<Arc<T>> {
+    (!ptr.is_null()).then(|| unsafe { Arc::from_raw(ptr) })
+}
 
 /// RCU cell, it behaves like `RwLock<Option<Arc<T>>>`
 #[derive(Debug)]
