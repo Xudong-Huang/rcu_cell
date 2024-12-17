@@ -203,9 +203,9 @@ impl<T> Default for RcuCell<T> {
 
 impl<T> From<Arc<T>> for RcuCell<T> {
     fn from(data: Arc<T>) -> Self {
-        let data = ManuallyDrop::new(data);
+        let arc_ptr = Arc::into_raw(data);
         RcuCell {
-            link: LinkWrapper::new(Arc::as_ptr(&data)),
+            link: LinkWrapper::new(arc_ptr),
         }
     }
 }
@@ -214,9 +214,9 @@ impl<T> From<Option<Arc<T>>> for RcuCell<T> {
     fn from(data: Option<Arc<T>>) -> Self {
         match data {
             Some(data) => {
-                let data = ManuallyDrop::new(data);
+                let arc_ptr = Arc::into_raw(data);
                 RcuCell {
-                    link: LinkWrapper::new(Arc::as_ptr(&data)),
+                    link: LinkWrapper::new(arc_ptr),
                 }
             }
             None => RcuCell::none(),
