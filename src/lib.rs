@@ -3,7 +3,7 @@
 
 extern crate alloc;
 
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 
 use core::marker::PhantomData;
 use core::mem::ManuallyDrop;
@@ -63,7 +63,7 @@ impl<T> LinkWrapper<T> {
         }
     }
 
-    fn update(&self, ptr: *const T) -> Option<Arc<T>> {
+    fn update(&self, ptr: *const T) -> *const T {
         use Ordering::*;
         let addr = Ptr { ptr }.addr();
         debug_assert!(addr & LOWER_MASK == 0);
@@ -80,12 +80,11 @@ impl<T> LinkWrapper<T> {
 
         core::sync::atomic::fence(Ordering::Acquire);
         let addr = old >> LEADING_BITS;
-        let ptr = Ptr { addr }.ptr();
-        Self::ptr_to_arc(ptr)
+        Ptr { addr }.ptr()
     }
 
     // this is only used after lock_read
-    fn unlock_update(&self, ptr: *const T) -> Option<Arc<T>> {
+    fn unlock_update(&self, ptr: *const T) -> *const T {
         use Ordering::*;
         let addr = Ptr { ptr }.addr();
         debug_assert!(addr & LOWER_MASK == 0);
@@ -102,18 +101,12 @@ impl<T> LinkWrapper<T> {
 
         core::sync::atomic::fence(Ordering::Acquire);
         let addr = (old & !UPDTATE_MASK) >> LEADING_BITS;
-        let ptr = Ptr { addr }.ptr();
-        Self::ptr_to_arc(ptr)
+        Ptr { addr }.ptr()
     }
 
     #[inline]
     fn is_none(&self) -> bool {
         self.ptr.load(Ordering::Relaxed) & !REFCOUNT_MASK == 0
-    }
-
-    #[inline]
-    fn ptr_to_arc(ptr: *const T) -> Option<Arc<T>> {
-        (!ptr.is_null()).then(|| unsafe { Arc::from_raw(ptr) })
     }
 
     #[inline]
@@ -137,21 +130,11 @@ impl<T> LinkWrapper<T> {
         self.ptr.fetch_sub(1, Ordering::Release);
     }
 
-    #[inline]
-    fn clone_inner(&self) -> Option<Arc<T>> {
-        let ptr = self.inc_ref();
-        let v = ManuallyDrop::new(Self::ptr_to_arc(ptr));
-        let cloned = v.as_ref().cloned();
-        self.dec_ref();
-        core::sync::atomic::fence(Ordering::Acquire);
-        cloned
-    }
-
     // read the inner Arc and increase the ref count
     // to prevet other writer to update the inner Arc
     // should be paired used with unlock_update
     #[inline]
-    fn lock_read(&self) -> Option<Arc<T>> {
+    fn lock_read(&self) -> *const T {
         use Ordering::*;
 
         let addr = self.ptr.load(Relaxed);
@@ -171,18 +154,25 @@ impl<T> LinkWrapper<T> {
         core::sync::atomic::fence(Ordering::Acquire);
 
         let addr = (old & !REFCOUNT_MASK) >> LEADING_BITS;
-        let ptr = Ptr { addr }.ptr();
-        let ret = Self::ptr_to_arc(ptr);
-        let _ = ManuallyDrop::new(ret.clone());
-        ret
+        Ptr { addr }.ptr()
     }
 }
 
 impl<T: fmt::Debug> fmt::Debug for LinkWrapper<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let inner = self.clone_inner();
-        f.debug_struct("Link").field("inner", &inner).finish()
+        let ptr = self.get_ref();
+        f.debug_struct("Link").field("ptr", &ptr).finish()
     }
+}
+
+#[inline]
+fn ptr_to_arc<T>(ptr: *const T) -> Option<Arc<T>> {
+    (!ptr.is_null()).then(|| unsafe { Arc::from_raw(ptr) })
+}
+
+#[inline]
+fn ptr_to_weak<T>(ptr: *const T) -> Weak<T> {
+    unsafe { Weak::from_raw(ptr) }
 }
 
 //---------------------------------------------------------------------------------------
@@ -201,7 +191,7 @@ unsafe impl<T: Send + Sync> Sync for RcuCell<T> {}
 impl<T> Drop for RcuCell<T> {
     fn drop(&mut self) {
         let ptr = self.link.get_ref();
-        let _ = LinkWrapper::ptr_to_arc(ptr);
+        let _ = ptr_to_arc(ptr);
     }
 }
 
@@ -262,7 +252,7 @@ impl<T> RcuCell<T> {
     /// convert the rcu cell to an Arc value
     pub fn into_arc(self) -> Option<Arc<T>> {
         let ptr = self.link.get_ref();
-        let ret = LinkWrapper::ptr_to_arc(ptr);
+        let ret = ptr_to_arc(ptr);
         let _ = ManuallyDrop::new(self);
         ret
     }
@@ -280,7 +270,7 @@ impl<T> RcuCell<T> {
             Some(data) => Arc::into_raw(data),
             None => ptr::null_mut(),
         };
-        self.link.update(new_ptr)
+        ptr_to_arc(self.link.update(new_ptr))
     }
 
     /// take the value from the rcu cell, leave the rcu cell empty
@@ -306,18 +296,25 @@ impl<T> RcuCell<T> {
         R: Into<Arc<T>>,
     {
         // increase ref count to lock the inner Arc
-        let v = self.link.lock_read();
-        let new_ptr = match f(v) {
+        let ptr = self.link.lock_read();
+        let old_value = ptr_to_arc(ptr);
+        let new_ptr = match f(old_value.clone()) {
             Some(data) => Arc::into_raw(data.into()),
             None => ptr::null_mut(),
         };
-        self.link.unlock_update(new_ptr)
+        self.link.unlock_update(new_ptr);
+        old_value
     }
 
     /// read out the inner Arc value
     #[inline]
     pub fn read(&self) -> Option<Arc<T>> {
-        self.link.clone_inner()
+        let ptr = self.link.inc_ref();
+        let v = ManuallyDrop::new(ptr_to_arc(ptr));
+        let cloned = v.as_ref().cloned();
+        self.link.dec_ref();
+        core::sync::atomic::fence(Ordering::Acquire);
+        cloned
     }
 
     /// read inner ptr and check if it is the same as the given Arc
@@ -328,6 +325,79 @@ impl<T> RcuCell<T> {
     /// check if two RcuCell instances point to the same inner Arc
     pub fn ptr_eq(this: &Self, other: &Self) -> bool {
         this.link.get_ref() == other.link.get_ref()
+    }
+}
+
+//---------------------------------------------------------------------------------------
+// RcuWeak
+//---------------------------------------------------------------------------------------
+
+/// RCU weak cell, it behaves like `RwLock<Option<Weak<T>>>`
+#[derive(Debug)]
+pub struct RcuWeak<T> {
+    link: LinkWrapper<T>,
+}
+
+unsafe impl<T: Send + Sync> Send for RcuWeak<T> {}
+unsafe impl<T: Send + Sync> Sync for RcuWeak<T> {}
+
+impl<T> Drop for RcuWeak<T> {
+    fn drop(&mut self) {
+        let ptr = self.link.get_ref();
+        let _ = ptr_to_weak(ptr);
+    }
+}
+
+impl<T> Default for RcuWeak<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T> From<Weak<T>> for RcuWeak<T> {
+    fn from(data: Weak<T>) -> Self {
+        let weak_ptr = Weak::into_raw(data);
+        RcuWeak {
+            link: LinkWrapper::new(weak_ptr),
+        }
+    }
+}
+
+impl<T> RcuWeak<T> {
+    // dummy weak, it's acutally usize::MAX as a pointer in the `Weak` implementation
+    const DEFAULT_WEAK_PTR: *const T = unsafe { core::mem::transmute(Weak::<T>::new()) };
+
+    /// create an dummy rcu weak cell instance, upgrade from it will return None
+    pub const fn new() -> Self {
+        RcuWeak {
+            link: LinkWrapper::new(Self::DEFAULT_WEAK_PTR),
+        }
+    }
+
+    /// write a new weak value to the rcu weak cell and return the old value
+    pub fn write(&self, data: Weak<T>) -> Weak<T> {
+        let new_ptr = Weak::into_raw(data);
+        ptr_to_weak(self.link.update(new_ptr))
+    }
+
+    /// read out the inner weak value
+    pub fn read(&self) -> Weak<T> {
+        let ptr = self.link.inc_ref();
+        let v = ManuallyDrop::new(ptr_to_weak(ptr));
+        let cloned = (*v).clone();
+        self.link.dec_ref();
+        core::sync::atomic::fence(Ordering::Acquire);
+        cloned
+    }
+
+    /// upgrade the innner weak value to an Arc value
+    pub fn upgrade(&self) -> Option<Arc<T>> {
+        let ptr = self.link.inc_ref();
+        let v = ManuallyDrop::new(ptr_to_weak(ptr));
+        let cloned = v.upgrade();
+        self.link.dec_ref();
+        core::sync::atomic::fence(Ordering::Acquire);
+        cloned
     }
 }
 
