@@ -172,7 +172,11 @@ fn ptr_to_arc<T>(ptr: *const T) -> Option<Arc<T>> {
 
 #[inline]
 fn ptr_to_weak<T>(ptr: *const T) -> Weak<T> {
-    unsafe { Weak::from_raw(ptr) }
+    if ptr.is_null() {
+        Weak::new()
+    } else {
+        unsafe { Weak::from_raw(ptr) }
+    }
 }
 
 //---------------------------------------------------------------------------------------
@@ -364,19 +368,28 @@ impl<T> From<Weak<T>> for RcuWeak<T> {
 }
 
 impl<T> RcuWeak<T> {
-    // dummy weak, it's acutally usize::MAX as a pointer in the `Weak` implementation
-    const DEFAULT_WEAK_PTR: *const T = unsafe { core::mem::transmute(Weak::<T>::new()) };
-
+    const DUMMY_WEAK: Weak<T> = Weak::new();
     /// create an dummy rcu weak cell instance, upgrade from it will return None
     pub const fn new() -> Self {
         RcuWeak {
-            link: LinkWrapper::new(Self::DEFAULT_WEAK_PTR),
+            link: LinkWrapper::new(ptr::null()),
         }
     }
 
     /// write a new weak value to the rcu weak cell and return the old value
     pub fn write(&self, data: Weak<T>) -> Weak<T> {
-        let new_ptr = Weak::into_raw(data);
+        let new_ptr = if data.ptr_eq(&Self::DUMMY_WEAK) {
+            ptr::null()
+        } else {
+            Weak::into_raw(data)
+        };
+        ptr_to_weak(self.link.update(new_ptr))
+    }
+
+    /// write a new `Weak` value downgrade from the `Arc`` to the cell and return the old value
+    pub fn write_arc(&self, data: &Arc<T>) -> Weak<T> {
+        let weak = Arc::downgrade(data);
+        let new_ptr = Weak::into_raw(weak);
         ptr_to_weak(self.link.update(new_ptr))
     }
 
