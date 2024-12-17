@@ -230,6 +230,7 @@ impl<T> From<Option<Arc<T>>> for RcuCell<T> {
 
 impl<T> RcuCell<T> {
     /// create an empty rcu cell instance
+    #[inline]
     pub const fn none() -> Self {
         RcuCell {
             link: LinkWrapper::new(ptr::null()),
@@ -237,6 +238,7 @@ impl<T> RcuCell<T> {
     }
 
     /// create rcu cell from a value
+    #[inline]
     pub fn some(data: T) -> Self {
         let ptr = Arc::into_raw(Arc::new(data));
         RcuCell {
@@ -245,6 +247,7 @@ impl<T> RcuCell<T> {
     }
 
     /// create rcu cell from value that can be converted to Option<T>
+    #[inline]
     pub fn new(data: impl Into<Option<T>>) -> Self {
         let data = data.into();
         match data {
@@ -254,6 +257,7 @@ impl<T> RcuCell<T> {
     }
 
     /// convert the rcu cell to an Arc value
+    #[inline]
     pub fn into_arc(self) -> Option<Arc<T>> {
         let ptr = self.link.get_ref();
         let ret = ptr_to_arc(ptr);
@@ -322,11 +326,13 @@ impl<T> RcuCell<T> {
     }
 
     /// read inner ptr and check if it is the same as the given Arc
+    #[inline]
     pub fn arc_eq(&self, data: &Arc<T>) -> bool {
         self.link.get_ref() == Arc::as_ptr(data)
     }
 
     /// check if two RcuCell instances point to the same inner Arc
+    #[inline]
     pub fn ptr_eq(this: &Self, other: &Self) -> bool {
         this.link.get_ref() == other.link.get_ref()
     }
@@ -370,6 +376,7 @@ impl<T> From<Weak<T>> for RcuWeak<T> {
 impl<T> RcuWeak<T> {
     const DUMMY_WEAK: Weak<T> = Weak::new();
     /// create an dummy rcu weak cell instance, upgrade from it will return None
+    #[inline]
     pub const fn new() -> Self {
         RcuWeak {
             link: LinkWrapper::new(ptr::null()),
@@ -377,6 +384,7 @@ impl<T> RcuWeak<T> {
     }
 
     /// write a new weak value to the rcu weak cell and return the old value
+    #[inline]
     pub fn write(&self, data: Weak<T>) -> Weak<T> {
         let new_ptr = if data.ptr_eq(&Self::DUMMY_WEAK) {
             ptr::null()
@@ -387,6 +395,7 @@ impl<T> RcuWeak<T> {
     }
 
     /// write a new `Weak` value downgrade from the `Arc`` to the cell and return the old value
+    #[inline]
     pub fn write_arc(&self, data: &Arc<T>) -> Weak<T> {
         let weak = Arc::downgrade(data);
         let new_ptr = Weak::into_raw(weak);
@@ -394,6 +403,7 @@ impl<T> RcuWeak<T> {
     }
 
     /// read out the inner weak value
+    #[inline]
     pub fn read(&self) -> Weak<T> {
         let ptr = self.link.inc_ref();
         let v = ManuallyDrop::new(ptr_to_weak(ptr));
@@ -404,6 +414,7 @@ impl<T> RcuWeak<T> {
     }
 
     /// upgrade the innner weak value to an Arc value
+    #[inline]
     pub fn upgrade(&self) -> Option<Arc<T>> {
         let ptr = self.link.inc_ref();
         let v = ManuallyDrop::new(ptr_to_weak(ptr));
@@ -414,16 +425,19 @@ impl<T> RcuWeak<T> {
     }
 
     /// read inner ptr and check if it is the same as the given Arc
+    #[inline]
     pub fn arc_eq(&self, data: &Arc<T>) -> bool {
         self.link.get_ref() == Arc::as_ptr(data)
     }
 
     /// read inner ptr and check if it is the same as the given Weak
+    #[inline]
     pub fn weak_eq(&self, data: &Weak<T>) -> bool {
         self.link.get_ref() == Weak::as_ptr(data)
     }
 
     /// check if two RcuWeak instances point to the same inner Weak
+    #[inline]
     pub fn ptr_eq(this: &Self, other: &Self) -> bool {
         this.link.get_ref() == other.link.get_ref()
     }
