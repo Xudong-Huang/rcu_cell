@@ -399,6 +399,21 @@ impl<T> RcuWeak<T> {
         core::sync::atomic::fence(Ordering::Acquire);
         cloned
     }
+
+    /// read inner ptr and check if it is the same as the given Arc
+    pub fn arc_eq(&self, data: &Arc<T>) -> bool {
+        self.link.get_ref() == Arc::as_ptr(data)
+    }
+
+    /// read inner ptr and check if it is the same as the given Weak
+    pub fn weak_eq(&self, data: &Weak<T>) -> bool {
+        self.link.get_ref() == Weak::as_ptr(data)
+    }
+
+    /// check if two RcuWeak instances point to the same inner Weak
+    pub fn ptr_eq(this: &Self, other: &Self) -> bool {
+        this.link.get_ref() == other.link.get_ref()
+    }
 }
 
 #[cfg(test)]
