@@ -374,7 +374,6 @@ impl<T> From<Weak<T>> for RcuWeak<T> {
 }
 
 impl<T> RcuWeak<T> {
-    const DUMMY_WEAK: Weak<T> = Weak::new();
     /// create an dummy rcu weak cell instance, upgrade from it will return None
     #[inline]
     pub const fn new() -> Self {
@@ -386,7 +385,7 @@ impl<T> RcuWeak<T> {
     /// write a new weak value to the rcu weak cell and return the old value
     #[inline]
     pub fn write(&self, data: Weak<T>) -> Weak<T> {
-        let new_ptr = if data.ptr_eq(&Self::DUMMY_WEAK) {
+        let new_ptr = if data.ptr_eq(&Weak::new()) {
             ptr::null()
         } else {
             Weak::into_raw(data)
