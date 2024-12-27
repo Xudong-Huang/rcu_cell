@@ -63,6 +63,12 @@ impl<T> RcuWeak<T> {
         ret
     }
 
+    /// take the value from the rcu weak, leave the rcu weak with default value
+    #[inline]
+    pub fn take(&self) -> Weak<T> {
+        ptr_to_weak(self.link.update(ptr::null()))
+    }
+
     /// write a new weak value to the rcu weak cell and return the old value
     #[inline]
     pub fn write(&self, data: Weak<T>) -> Weak<T> {
