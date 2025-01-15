@@ -14,6 +14,36 @@ pub use rcu_weak::RcuWeak;
 const _: () = assert!(usize::MAX.count_ones() == 64);
 const _: () = assert!(core::mem::size_of::<*const ()>() == 8);
 
+use alloc::sync::Arc;
+
+pub trait ArcPointer<T> {
+    fn as_ptr(&self) -> *const T;
+    fn into_raw(self) -> *const T;
+    /// # Safety
+    /// you must ensure the pointer is valid
+    unsafe fn from_raw(ptr: *const T) -> Self;
+}
+
+impl<T> ArcPointer<T> for Option<Arc<T>> {
+    fn as_ptr(&self) -> *const T {
+        match self {
+            Some(v) => Arc::as_ptr(v),
+            None => core::ptr::null(),
+        }
+    }
+
+    fn into_raw(self) -> *const T {
+        match self {
+            Some(v) => Arc::into_raw(v),
+            None => core::ptr::null(),
+        }
+    }
+
+    unsafe fn from_raw(ptr: *const T) -> Self {
+        (!ptr.is_null()).then(|| Arc::from_raw(ptr))
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::RcuCell;

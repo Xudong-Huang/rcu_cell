@@ -4,10 +4,11 @@ use core::ptr;
 use core::sync::atomic::Ordering;
 
 use crate::link::LinkWrapper;
+use crate::ArcPointer;
 
 #[inline]
 fn ptr_to_arc<T>(ptr: *const T) -> Option<Arc<T>> {
-    (!ptr.is_null()).then(|| unsafe { Arc::from_raw(ptr) })
+    unsafe { ArcPointer::from_raw(ptr) }
 }
 
 /// RCU cell, it behaves like `RwLock<Option<Arc<T>>>`
@@ -43,14 +44,9 @@ impl<T> From<Arc<T>> for RcuCell<T> {
 
 impl<T> From<Option<Arc<T>>> for RcuCell<T> {
     fn from(data: Option<Arc<T>>) -> Self {
-        match data {
-            Some(data) => {
-                let arc_ptr = Arc::into_raw(data);
-                RcuCell {
-                    link: LinkWrapper::new(arc_ptr),
-                }
-            }
-            None => RcuCell::none(),
+        let ptr = data.into_raw();
+        RcuCell {
+            link: LinkWrapper::new(ptr),
         }
     }
 }
@@ -101,10 +97,7 @@ impl<T> RcuCell<T> {
     /// write an option arc value to the rcu cell and return the old value
     #[inline]
     pub fn set(&self, data: Option<Arc<T>>) -> Option<Arc<T>> {
-        let new_ptr = match data {
-            Some(data) => Arc::into_raw(data),
-            None => ptr::null_mut(),
-        };
+        let new_ptr = data.into_raw();
         ptr_to_arc(self.link.update(new_ptr))
     }
 
@@ -141,6 +134,68 @@ impl<T> RcuCell<T> {
         old_value
     }
 
+    /// Stores the optional Arc ref `new` into the RcuCell if the current
+    /// value is the same as `current`. The tag is also taken into account, so two pointers to the
+    /// same object, but with different tags, will not be considered equal.
+    ///
+    /// The return value is a result indicating whether the new value was written and containing the previous value.
+    /// On success this value is guaranteed to be equal to current.
+    ///
+    /// This method takes two `Ordering` arguments to describe the memory
+    /// ordering of this operation. `success` describes the required ordering for the
+    /// read-modify-write operation that takes place if the comparison with `current` succeeds.
+    /// `failure` describes the required ordering for the load operation that takes place when
+    /// the comparison fails. Using `Acquire` as success ordering makes the store part
+    /// of this operation `Relaxed`, and using `Release` makes the successful load
+    /// `Relaxed`. The failure ordering can only be `SeqCst`, `Acquire` or `Relaxed`
+    /// and must be equivalent to or weaker than the success ordering.
+    ///
+    /// # Safety
+    ///
+    /// don't deref the returned pointer, it's may be dropped by other threads
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rcu_cell::{RcuCell, ArcPointer};
+    ///
+    /// use std::sync::Arc;
+    /// use std::sync::atomic::Ordering::SeqCst;
+    ///
+    /// let a = RcuCell::new(1234);
+    ///
+    /// let curr = a.read();
+    /// let res1 = unsafe { a.compare_exchange(curr.as_ptr(), None, SeqCst, SeqCst) }.unwrap();
+    /// let res2 = unsafe { a.compare_exchange(res1, Some(&Arc::new(5678)), SeqCst, SeqCst) };
+    /// ```
+    pub unsafe fn compare_exchange<'a>(
+        &self,
+        current: *const T,
+        new: Option<&'a Arc<T>>,
+        success: Ordering,
+        failure: Ordering,
+    ) -> Result<*const T, *const T>
+    where
+        T: 'a,
+    {
+        let new_ptr = match new {
+            Some(data) => Arc::as_ptr(data),
+            None => ptr::null(),
+        };
+
+        self.link
+            .compare_exchange(current, new_ptr, success, failure)
+            .inspect(|ptr| {
+                // we have succeed to exchange the arc
+                if let Some(v) = new {
+                    // clone and forget the arc that hold by rcu cell
+                    core::mem::forget(Arc::clone(v));
+                    // drop the old arc in the ruc cell
+                    let _ = ptr_to_arc(ptr);
+                }
+            })
+    }
+
     /// read out the inner Arc value
     #[inline]
     pub fn read(&self) -> Option<Arc<T>> {
@@ -162,5 +217,22 @@ impl<T> RcuCell<T> {
     #[inline]
     pub fn ptr_eq(this: &Self, other: &Self) -> bool {
         this.link.get_ref() == other.link.get_ref()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cas_test() {
+        use Ordering::SeqCst;
+        let a = RcuCell::new(1234);
+
+        let curr = a.read().as_ptr();
+        let res1 = unsafe { a.compare_exchange(curr, None, SeqCst, SeqCst) }.unwrap();
+        assert_eq!(res1, curr);
+        let res2 = unsafe { a.compare_exchange(res1, Some(&Arc::new(5678)), SeqCst, SeqCst) };
+        assert!(res2.is_err());
     }
 }

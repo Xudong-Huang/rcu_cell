@@ -47,6 +47,29 @@ impl<T> LinkWrapper<T> {
         }
     }
 
+    pub(crate) unsafe fn compare_exchange(
+        &self,
+        current: *const T,
+        new: *const T,
+        success: Ordering,
+        failure: Ordering,
+    ) -> Result<*const T, *const T> {
+        let new_addr = Ptr { ptr: new }.addr();
+        let new = new_addr << LEADING_BITS;
+
+        let old_addr = Ptr { ptr: current }.addr();
+        let old = old_addr << LEADING_BITS;
+
+        // wait all reader release
+        match self.ptr.compare_exchange(old, new, success, failure) {
+            Ok(_) => Ok(current),
+            Err(addr) => {
+                let addr = addr >> LEADING_BITS;
+                Err(Ptr { addr }.ptr())
+            }
+        }
+    }
+
     pub(crate) fn update(&self, ptr: *const T) -> *const T {
         use Ordering::*;
         let addr = Ptr { ptr }.addr();
