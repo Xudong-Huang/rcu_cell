@@ -64,7 +64,7 @@ impl<T> LinkWrapper<T> {
         match self.ptr.compare_exchange(old, new, success, failure) {
             Ok(_) => Ok(current),
             Err(addr) => {
-                let addr = addr >> LEADING_BITS;
+                let addr = (addr & !REFCOUNT_MASK) >> LEADING_BITS;
                 Err(Ptr { addr }.ptr())
             }
         }
