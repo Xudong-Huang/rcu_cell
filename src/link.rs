@@ -60,12 +60,20 @@ impl<T> LinkWrapper<T> {
         let old_addr = Ptr { ptr: current }.addr();
         let old = old_addr << LEADING_BITS;
 
-        // wait all reader release
-        match self.ptr.compare_exchange(old, new, success, failure) {
-            Ok(_) => Ok(current),
-            Err(addr) => {
-                let addr = (addr & !REFCOUNT_MASK) >> LEADING_BITS;
-                Err(Ptr { addr }.ptr())
+        let backoff = crossbeam_utils::Backoff::new();
+        loop {
+            match self.ptr.compare_exchange(old, new, success, failure) {
+                Ok(_addr) => {
+                    // assert_eq!(old, addr);
+                    return Ok(current);
+                }
+                Err(addr) => {
+                    let addr = (addr & !REFCOUNT_MASK) >> LEADING_BITS;
+                    if addr != old {
+                        return Err(Ptr { addr }.ptr());
+                    }
+                    backoff.snooze();
+                }
             }
         }
     }

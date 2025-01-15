@@ -189,8 +189,8 @@ impl<T> RcuCell<T> {
                 // we have succeed to exchange the arc
                 if let Some(v) = new {
                     // clone and forget the arc that hold by rcu cell
-                    core::mem::forget(Arc::clone(v));
-                    // drop the old arc in the ruc cell
+                    let _ = Arc::into_raw(Arc::clone(v));
+                    // drop the old arc in the rcu cell
                     let _ = ptr_to_arc(ptr);
                 }
             })
