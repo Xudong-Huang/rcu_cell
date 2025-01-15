@@ -186,4 +186,24 @@ mod test {
         assert!(RcuCell::ptr_eq(&t, &t1));
         assert!(t2.arc_eq(v2.as_ref().unwrap()));
     }
+
+    #[test]
+    fn cas_test() {
+        use super::ArcPointer;
+        use Ordering::SeqCst;
+
+        let a = RcuCell::new(1234);
+
+        let curr = a.read().as_ptr();
+        let res1 = unsafe { a.compare_exchange(curr, None, SeqCst, SeqCst) }.unwrap();
+        assert_eq!(res1, curr);
+        assert!(a.is_none());
+        let res2 = unsafe { a.compare_exchange(res1, Some(&Arc::new(5678)), SeqCst, SeqCst) };
+        assert!(res2.is_err());
+
+        let null = core::ptr::null();
+        let res2 = unsafe { a.compare_exchange(null, Some(&Arc::new(5678)), SeqCst, SeqCst) };
+        assert!(res2.is_ok());
+        assert_eq!(a.read().map(|v| *v), Some(5678));
+    }
 }

@@ -219,20 +219,3 @@ impl<T> RcuCell<T> {
         this.link.get_ref() == other.link.get_ref()
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn cas_test() {
-        use Ordering::SeqCst;
-        let a = RcuCell::new(1234);
-
-        let curr = a.read().as_ptr();
-        let res1 = unsafe { a.compare_exchange(curr, None, SeqCst, SeqCst) }.unwrap();
-        assert_eq!(res1, curr);
-        let res2 = unsafe { a.compare_exchange(res1, Some(&Arc::new(5678)), SeqCst, SeqCst) };
-        assert!(res2.is_err());
-    }
-}
