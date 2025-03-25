@@ -113,18 +113,18 @@ impl<T> RcuWeak<T> {
     /// read inner ptr and check if it is the same as the given Arc
     #[inline]
     pub fn arc_eq(&self, data: &Arc<T>) -> bool {
-        self.link.get_ref() == Arc::as_ptr(data)
+        core::ptr::eq(self.link.get_ref(), Arc::as_ptr(data))
     }
 
     /// read inner ptr and check if it is the same as the given Weak
     #[inline]
     pub fn weak_eq(&self, data: &Weak<T>) -> bool {
-        self.link.get_ref() == Weak::as_ptr(data)
+        core::ptr::eq(self.link.get_ref(), Weak::as_ptr(data))
     }
 
     /// check if two RcuWeak instances point to the same inner Weak
     #[inline]
     pub fn ptr_eq(this: &Self, other: &Self) -> bool {
-        this.link.get_ref() == other.link.get_ref()
+        core::ptr::eq(this.link.get_ref(), other.link.get_ref())
     }
 }
