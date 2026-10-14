@@ -7,7 +7,6 @@ authors = ["Xudong Huang <huangxu008@hotmail.com>"]
 categories = ["concurrency", "data-structures", "no-std"]
 keywords = ["rcu", "lockless", "atomic"]
 repository = "https://github.com/Xudong-Huang/rcu_cell"
-homepage = "https://github.com/Xudong-Huang/rcu_cell"
 documentation = "https://docs.rs/rcu_cell"
 license = "LGPL-3.0"
 readme = "./README.md"

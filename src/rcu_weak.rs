@@ -40,7 +40,7 @@ impl<T> From<Weak<T>> for RcuWeak<T> {
     fn from(data: Weak<T>) -> Self {
         let weak_ptr = Weak::into_raw(data);
         RcuWeak {
-            link: LinkWrapper::new(weak_ptr),
+            link: LinkWrapper::from_ptr(weak_ptr),
         }
     }
 }
@@ -50,7 +50,7 @@ impl<T> RcuWeak<T> {
     #[inline]
     pub const fn new() -> Self {
         RcuWeak {
-            link: LinkWrapper::new(ptr::null()),
+            link: LinkWrapper::new(),
         }
     }
 

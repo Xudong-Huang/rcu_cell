@@ -37,7 +37,7 @@ impl<T> From<Arc<T>> for RcuCell<T> {
     fn from(data: Arc<T>) -> Self {
         let arc_ptr = Arc::into_raw(data);
         RcuCell {
-            link: LinkWrapper::new(arc_ptr),
+            link: LinkWrapper::from_ptr(arc_ptr),
         }
     }
 }
@@ -46,7 +46,7 @@ impl<T> From<Option<Arc<T>>> for RcuCell<T> {
     fn from(data: Option<Arc<T>>) -> Self {
         let ptr = data.into_raw();
         RcuCell {
-            link: LinkWrapper::new(ptr),
+            link: LinkWrapper::from_ptr(ptr),
         }
     }
 }
@@ -56,7 +56,7 @@ impl<T> RcuCell<T> {
     #[inline]
     pub const fn none() -> Self {
         RcuCell {
-            link: LinkWrapper::new(ptr::null()),
+            link: LinkWrapper::new(),
         }
     }
 
@@ -65,7 +65,7 @@ impl<T> RcuCell<T> {
     pub fn some(data: T) -> Self {
         let ptr = Arc::into_raw(Arc::new(data));
         RcuCell {
-            link: LinkWrapper::new(ptr),
+            link: LinkWrapper::from_ptr(ptr),
         }
     }
 
@@ -187,7 +187,7 @@ impl<T> RcuCell<T> {
             .compare_exchange(current, new_ptr, success, failure)
             .inspect(|ptr| {
                 // drop the old arc in the rcu cell
-                let _ = ptr_to_arc(ptr);
+                let _ = ptr_to_arc(*ptr);
                 // we have succeed to exchange the arc
                 if let Some(v) = new {
                     // clone and forget the arc that hold by rcu cell

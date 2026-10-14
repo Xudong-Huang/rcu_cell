@@ -11,22 +11,14 @@ const REFCOUNT_MASK: usize = (1 << (LEADING_BITS + ALIGN_BITS)) - 1;
 const UPDTATE_MASK: usize = 1 << (LEADING_BITS + ALIGN_BITS - 1);
 const UPDATE_REF_MASK: usize = REFCOUNT_MASK & !UPDTATE_MASK;
 
-#[repr(C)]
-union Ptr<T> {
-    addr: usize,
-    ptr: *const T,
+#[inline]
+fn ptr_to_addr<T>(ptr: *const T) -> usize {
+    ptr.expose_provenance()
 }
 
-impl<T> Ptr<T> {
-    #[inline]
-    const fn addr(self) -> usize {
-        unsafe { self.addr }
-    }
-
-    #[inline]
-    const fn ptr(self) -> *const T {
-        unsafe { self.ptr }
-    }
+#[inline]
+fn addr_to_ptr<T>(addr: usize) -> *const T {
+    core::ptr::with_exposed_provenance(addr)
 }
 
 /// A wrapper of the pointer to the inner Arc data
@@ -37,8 +29,16 @@ pub(crate) struct LinkWrapper<T> {
 
 impl<T> LinkWrapper<T> {
     #[inline]
-    pub(crate) const fn new(ptr: *const T) -> Self {
-        let addr = Ptr { ptr }.addr();
+    pub(crate) const fn new() -> Self {
+        LinkWrapper {
+            ptr: AtomicUsize::new(0),
+            phantom: PhantomData,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn from_ptr(ptr: *const T) -> Self {
+        let addr = ptr_to_addr(ptr);
         debug_assert!(addr & LOWER_MASK == 0);
         debug_assert!(addr & HIGHER_MASK == 0);
         LinkWrapper {
@@ -54,10 +54,10 @@ impl<T> LinkWrapper<T> {
         success: Ordering,
         failure: Ordering,
     ) -> Result<*const T, *const T> {
-        let new_addr = Ptr { ptr: new }.addr();
+        let new_addr = ptr_to_addr(new);
         let new = new_addr << LEADING_BITS;
 
-        let old_addr = Ptr { ptr: current }.addr();
+        let old_addr = ptr_to_addr(current);
         let old = old_addr << LEADING_BITS;
 
         let backoff = crossbeam_utils::Backoff::new();
@@ -70,7 +70,7 @@ impl<T> LinkWrapper<T> {
                 Err(addr) => {
                     let addr = (addr & !REFCOUNT_MASK) >> LEADING_BITS;
                     if addr != old {
-                        return Err(Ptr { addr }.ptr());
+                        return Err(addr_to_ptr(addr));
                     }
                     backoff.snooze();
                 }
@@ -80,7 +80,7 @@ impl<T> LinkWrapper<T> {
 
     pub(crate) fn update(&self, ptr: *const T) -> *const T {
         use Ordering::*;
-        let addr = Ptr { ptr }.addr();
+        let addr = ptr_to_addr(ptr);
         debug_assert!(addr & LOWER_MASK == 0);
         debug_assert!(addr & HIGHER_MASK == 0);
         let new = addr << LEADING_BITS;
@@ -95,13 +95,13 @@ impl<T> LinkWrapper<T> {
 
         core::sync::atomic::fence(Ordering::Acquire);
         let addr = old >> LEADING_BITS;
-        Ptr { addr }.ptr()
+        addr_to_ptr(addr)
     }
 
     // this is only used after lock_read
     pub(crate) fn unlock_update(&self, ptr: *const T) -> *const T {
         use Ordering::*;
-        let addr = Ptr { ptr }.addr();
+        let addr = ptr_to_addr(ptr);
         debug_assert!(addr & LOWER_MASK == 0);
         debug_assert!(addr & HIGHER_MASK == 0);
         let new = addr << LEADING_BITS;
@@ -116,7 +116,7 @@ impl<T> LinkWrapper<T> {
 
         core::sync::atomic::fence(Ordering::Acquire);
         let addr = (old & !UPDTATE_MASK) >> LEADING_BITS;
-        Ptr { addr }.ptr()
+        addr_to_ptr(addr)
     }
 
     #[inline]
@@ -130,14 +130,14 @@ impl<T> LinkWrapper<T> {
         let refs = addr & REFCOUNT_MASK;
         assert!(refs < REFCOUNT_MASK, "Too many references");
         let addr = (addr & !REFCOUNT_MASK) >> LEADING_BITS;
-        Ptr { addr }.ptr()
+        addr_to_ptr(addr)
     }
 
     #[inline]
     pub(crate) fn get_ref(&self) -> *const T {
         let addr = self.ptr.load(Ordering::Acquire);
         let addr = (addr & !REFCOUNT_MASK) >> LEADING_BITS;
-        Ptr { addr }.ptr()
+        addr_to_ptr(addr)
     }
 
     #[inline]
@@ -169,7 +169,7 @@ impl<T> LinkWrapper<T> {
         core::sync::atomic::fence(Ordering::Acquire);
 
         let addr = (old & !REFCOUNT_MASK) >> LEADING_BITS;
-        Ptr { addr }.ptr()
+        addr_to_ptr(addr)
     }
 }
 
