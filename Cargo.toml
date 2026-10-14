@@ -16,5 +16,5 @@ exclude = [".gitignore", "benches/**"]
 crossbeam-utils = "0.8.20"
 
 [dev-dependencies]
-spin = "0.10"
+spin = "0.12"
 arc-swap = "1.7"
