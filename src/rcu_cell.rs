@@ -17,7 +17,7 @@ pub struct RcuCell<T> {
     link: LinkWrapper<T>,
 }
 
-unsafe impl<T: Send> Send for RcuCell<T> {}
+unsafe impl<T: Send + Sync> Send for RcuCell<T> {}
 unsafe impl<T: Send + Sync> Sync for RcuCell<T> {}
 
 impl<T> Drop for RcuCell<T> {
