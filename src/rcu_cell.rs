@@ -29,26 +29,15 @@ fn ptr_to_arc<T: ?Sized>(ptr: *const T) -> Option<Arc<T>> {
 /// ```
 ///
 /// Limitations:
-/// - Only the data address is stored atomically, the pointer metadata (vtable
-///   or length) is kept from construction. An unsized cell can't be created
-///   empty, and `none()`, `some()`, `new()` and `Default` need `T: Sized`.
-/// - Values written later must have exactly the same pointer metadata (the
-///   same slice length, or the same `dyn Trait` vtable) as the initial one,
-///   otherwise the write panics. Writing a different concrete type or length
-///   is therefore never undefined behavior, but it can't be supported.
-///   Vtable addresses are not guaranteed to be unique for a type (e.g. across
-///   codegen units), so a write of the same concrete type may also panic.
-///   Use `RcuCell<Arc<dyn Trait>>` if you need to swap implementors.
-///
-/// A write with a different pointer metadata panics:
-///
-/// ```should_panic
-/// use rcu_cell::RcuCell;
-/// use std::sync::Arc;
-///
-/// let cell: RcuCell<[u8]> = RcuCell::from(Arc::<[u8]>::from(&[1, 2, 3][..]));
-/// cell.write(Arc::<[u8]>::from(&[1, 2][..]));
-/// ```
+/// - An unsized cell can't be created empty (there is no metadata to start
+///   with), so `none()`, `some()`, `new()` and `Default` need `T: Sized`. It can
+///   be emptied later with `take()` and written again.
+/// - The data address and the pointer metadata (vtable or length) are stored in
+///   one 128-bit atomic, so values with different concrete types or lengths can
+///   be swapped freely. This relies on `portable-atomic`: it is lock-free where
+///   the target has native 128-bit atomics (e.g. x86-64 with `cmpxchg16b`,
+///   aarch64), otherwise it falls back to a spin lock inside the atomic.
+/// - Sized cells keep using a single `AtomicUsize`, so they pay nothing for this.
 #[derive(Debug)]
 pub struct RcuCell<T: ?Sized> {
     link: LinkWrapper<T>,
@@ -144,10 +133,7 @@ impl<T: ?Sized> RcuCell<T> {
     #[inline]
     fn arc_to_ptr(&self, data: Option<Arc<T>>) -> *const T {
         match data {
-            Some(data) => {
-                self.link.check_meta(Arc::as_ptr(&data));
-                Arc::into_raw(data)
-            }
+            Some(data) => Arc::into_raw(data),
             None => self.link.null(),
         }
     }
@@ -180,11 +166,7 @@ impl<T: ?Sized> RcuCell<T> {
         // in `f` or in the metadata check must not drop it
         let old_value = ManuallyDrop::new(ptr_to_arc(ptr));
         let new_ptr = match f((*old_value).clone()) {
-            Some(data) => {
-                let data = data.into();
-                self.link.check_meta(Arc::as_ptr(&data));
-                Arc::into_raw(data)
-            }
+            Some(data) => Arc::into_raw(data.into()),
             None => self.link.null(),
         };
         self.link.unlock_update(new_ptr);
@@ -236,11 +218,7 @@ impl<T: ?Sized> RcuCell<T> {
         T: 'a,
     {
         let new_ptr = match new {
-            Some(data) => {
-                let ptr = Arc::as_ptr(data);
-                self.link.check_meta(ptr);
-                ptr
-            }
+            Some(data) => Arc::as_ptr(data),
             None => self.link.null(),
         };
 
@@ -271,12 +249,12 @@ impl<T: ?Sized> RcuCell<T> {
     /// read inner ptr and check if it is the same as the given Arc
     #[inline]
     pub fn arc_eq(&self, data: &Arc<T>) -> bool {
-        core::ptr::eq(self.link.get_ref(), Arc::as_ptr(data))
+        core::ptr::addr_eq(self.link.get_ref(), Arc::as_ptr(data))
     }
 
     /// check if two RcuCell instances point to the same inner Arc
     #[inline]
     pub fn ptr_eq(this: &Self, other: &Self) -> bool {
-        core::ptr::eq(this.link.get_ref(), other.link.get_ref())
+        core::ptr::addr_eq(this.link.get_ref(), other.link.get_ref())
     }
 }

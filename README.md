@@ -41,5 +41,6 @@ A lockless rcu cell implementation that can be used safely in multithread contex
 
 `RcuCell<T>` and `RcuWeak<T>` accept unsized `T` (`dyn Trait`, `[U]`, `str`), created from an existing `Arc`/`Weak`, e.g. `RcuCell::from(Arc::new(A) as Arc<dyn B>)`.
 
-- The pointer metadata (vtable or length) is kept from construction; an unsized cell can't be created empty.
-- Later writes must have exactly the same pointer metadata (slice length or `dyn` vtable) as the initial value, otherwise they panic. This keeps the API sound, but vtable addresses are not guaranteed to be unique for a type, so a write of the same concrete type may also panic spuriously. Use `RcuCell<Arc<dyn Trait>>` if you need to swap implementors.
+- An unsized cell can't be created empty, so `none()`, `some()`, `new()` and `Default` need `T: Sized`. It can be emptied with `take()` and written again.
+- The data address and the pointer metadata (vtable or length) live in one 128-bit atomic, so different concrete types or lengths can be swapped freely. It uses `portable-atomic`, lock-free on targets with native 128-bit atomics (x86-64 with `cmpxchg16b`, aarch64) and a spin lock fallback otherwise.
+- Sized cells still use a single `AtomicUsize`.

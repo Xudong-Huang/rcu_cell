@@ -207,8 +207,6 @@ mod test {
         assert_eq!(a.read().map(|v| *v), Some(5678));
     }
 
-    // Miri gives every unsizing its own vtable, which makes the exact vtable check panic
-    #[cfg(not(miri))]
     #[test]
     fn test_unsized() {
         trait B: Send + Sync {
@@ -236,8 +234,6 @@ mod test {
         assert_eq!(&*s.read().unwrap(), &[1, 2, 3]);
     }
 
-    // Miri gives every unsizing its own vtable, which makes the exact vtable check panic
-    #[cfg(not(miri))]
     #[test]
     fn test_unsized_weak() {
         use super::RcuWeak;
@@ -276,7 +272,6 @@ mod test {
     }
 
     trait Id: Send + Sync {
-        #[allow(dead_code)]
         fn id(&self) -> u32;
     }
     struct Small(u32);
@@ -288,58 +283,101 @@ mod test {
     }
     impl Id for Big {
         fn id(&self) -> u32 {
-            self.0 | (self.1 as u32)
+            self.0 + 100
         }
     }
 
     #[test]
-    #[should_panic(expected = "pointer metadata")]
-    fn test_cell_slice_len_changed_write() {
+    fn test_cell_slice_len_changed() {
         let c: RcuCell<[u8]> = RcuCell::from(Arc::<[u8]>::from(&[1u8, 2, 3][..]));
-        c.write(Arc::<[u8]>::from(&[1u8, 2][..]));
+        let old = c.write(Arc::<[u8]>::from(&[4u8, 5][..])).unwrap();
+        assert_eq!(&*old, &[1, 2, 3]);
+        assert_eq!(&*c.read().unwrap(), &[4, 5]);
+        assert_eq!(&*c.take().unwrap(), &[4, 5]);
+        assert!(c.read().is_none());
+        c.write(Arc::<[u8]>::from(&[9u8][..]));
+        assert_eq!(&*c.read().unwrap(), &[9]);
     }
 
     #[test]
-    #[should_panic(expected = "pointer metadata")]
-    fn test_cell_dyn_layout_changed_write() {
+    fn test_cell_dyn_swap_implementors() {
         let c: RcuCell<dyn Id> = RcuCell::from(Arc::new(Small(1)) as Arc<dyn Id>);
-        c.write(Arc::new(Big(2, 3)) as Arc<dyn Id>);
+        assert_eq!(c.read().unwrap().id(), 1);
+        assert_eq!(c.write(Arc::new(Big(2, 3)) as Arc<dyn Id>).unwrap().id(), 1);
+        assert_eq!(c.read().unwrap().id(), 102);
+        let old = c.update(|old| {
+            assert_eq!(old.unwrap().id(), 102);
+            Some(Arc::new(Small(5)) as Arc<dyn Id>)
+        });
+        assert_eq!(old.unwrap().id(), 102);
+        assert_eq!(c.read().unwrap().id(), 5);
+        assert!(c.take().is_some());
+        assert!(c.read().is_none());
+        c.write(Arc::new(Big(7, 7)) as Arc<dyn Id>);
+        assert_eq!(c.read().unwrap().id(), 107);
     }
 
     #[test]
-    #[should_panic(expected = "pointer metadata")]
-    fn test_cell_dyn_layout_changed_update() {
-        let c: RcuCell<dyn Id> = RcuCell::from(Arc::new(Small(1)) as Arc<dyn Id>);
-        c.update(|_| Some(Arc::new(Big(2, 3)) as Arc<dyn Id>));
-    }
-
-    #[test]
-    #[should_panic(expected = "pointer metadata")]
-    fn test_cell_dyn_layout_changed_compare_exchange() {
+    fn test_cell_dyn_compare_exchange() {
         use Ordering::SeqCst;
         let c: RcuCell<dyn Id> = RcuCell::from(Arc::new(Small(1)) as Arc<dyn Id>);
         let cur = Arc::as_ptr(&c.read().unwrap());
         let new = Arc::new(Big(2, 3)) as Arc<dyn Id>;
-        let _ = unsafe { c.compare_exchange(cur, Some(&new), SeqCst, SeqCst) };
+        assert!(unsafe { c.compare_exchange(cur, Some(&new), SeqCst, SeqCst) }.is_ok());
+        assert_eq!(c.read().unwrap().id(), 102);
+        assert!(c.arc_eq(&new));
+        // the old pointer is stale now
+        assert!(unsafe { c.compare_exchange(cur, None, SeqCst, SeqCst) }.is_err());
+        let cur = Arc::as_ptr(&new);
+        assert!(unsafe { c.compare_exchange(cur, None, SeqCst, SeqCst) }.is_ok());
+        assert!(c.is_none());
     }
 
     #[test]
-    #[should_panic(expected = "pointer metadata")]
-    fn test_weak_slice_len_changed_write() {
-        use super::RcuWeak;
-        let a: Arc<[u8]> = Arc::from(&[1u8, 2, 3][..]);
-        let b: Arc<[u8]> = Arc::from(&[1u8, 2][..]);
-        let w = RcuWeak::from(Arc::downgrade(&a));
-        w.write_arc(&b);
-    }
-
-    #[test]
-    #[should_panic(expected = "pointer metadata")]
-    fn test_weak_dyn_layout_changed_write() {
+    fn test_weak_dyn_swap_implementors() {
         use super::RcuWeak;
         let a = Arc::new(Small(1)) as Arc<dyn Id>;
         let b = Arc::new(Big(2, 3)) as Arc<dyn Id>;
         let w = RcuWeak::from(Arc::downgrade(&a));
+        assert_eq!(w.upgrade().unwrap().id(), 1);
         w.write(Arc::downgrade(&b));
+        assert_eq!(w.upgrade().unwrap().id(), 102);
+        w.write_arc(&a);
+        assert_eq!(w.upgrade().unwrap().id(), 1);
+    }
+
+    #[test]
+    fn test_dyn_concurrent_swap() {
+        extern crate std;
+        const N: u64 = if cfg!(miri) { 50 } else { 20000 };
+        let c: Arc<RcuCell<dyn Id>> = Arc::new(RcuCell::from(Arc::new(Small(1)) as Arc<dyn Id>));
+        let writer = {
+            let c = c.clone();
+            std::thread::spawn(move || {
+                for i in 0..N {
+                    if i % 2 == 0 {
+                        c.write(Arc::new(Big(1, i)) as Arc<dyn Id>);
+                    } else {
+                        c.write(Arc::new(Small(1)) as Arc<dyn Id>);
+                    }
+                }
+            })
+        };
+        let readers: std::vec::Vec<_> = (0..3)
+            .map(|_| {
+                let c = c.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..N {
+                        // a torn address/vtable pair would return a wrong id or crash
+                        let id = c.read().unwrap().id();
+                        assert!(id == 1 || id == 101);
+                    }
+                })
+            })
+            .collect();
+        writer.join().unwrap();
+        for r in readers {
+            r.join().unwrap();
+        }
     }
 }

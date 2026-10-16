@@ -39,16 +39,15 @@ fn is_dangling<T: ?Sized>(ptr: *const T) -> bool {
 /// ```
 ///
 /// Limitations:
-/// - Only the data address is stored atomically, the pointer metadata (vtable
-///   or length) is kept from construction. An unsized cell can't be created
-///   empty, and `none()`, `some()`, `new()` and `Default` need `T: Sized`.
-/// - Values written later must have exactly the same pointer metadata (the
-///   same slice length, or the same `dyn Trait` vtable) as the initial one,
-///   otherwise the write panics. Writing a different concrete type or length
-///   is therefore never undefined behavior, but it can't be supported.
-///   Vtable addresses are not guaranteed to be unique for a type (e.g. across
-///   codegen units), so a write of the same concrete type may also panic.
-///   Use `RcuWeak<Arc<dyn Trait>>` if you need to swap implementors.
+/// - An unsized cell can't be created empty (there is no metadata to start
+///   with), so `none()`, `some()`, `new()` and `Default` need `T: Sized`. It can
+///   be emptied later with `take()` and written again.
+/// - The data address and the pointer metadata (vtable or length) are stored in
+///   one 128-bit atomic, so values with different concrete types or lengths can
+///   be swapped freely. This relies on `portable-atomic`: it is lock-free where
+///   the target has native 128-bit atomics (e.g. x86-64 with `cmpxchg16b`,
+///   aarch64), otherwise it falls back to a spin lock inside the atomic.
+/// - Sized cells keep using a single `AtomicUsize`, so they pay nothing for this.
 #[derive(Debug)]
 pub struct RcuWeak<T: ?Sized> {
     link: LinkWrapper<T>,
@@ -107,7 +106,6 @@ impl<T: ?Sized> RcuWeak<T> {
         if is_dangling(ptr) {
             return self.link.null();
         }
-        self.link.check_meta(ptr);
         Weak::into_raw(data)
     }
 
@@ -156,18 +154,18 @@ impl<T: ?Sized> RcuWeak<T> {
     /// read inner ptr and check if it is the same as the given Arc
     #[inline]
     pub fn arc_eq(&self, data: &Arc<T>) -> bool {
-        core::ptr::eq(self.link.get_ref(), Arc::as_ptr(data))
+        core::ptr::addr_eq(self.link.get_ref(), Arc::as_ptr(data))
     }
 
     /// read inner ptr and check if it is the same as the given Weak
     #[inline]
     pub fn weak_eq(&self, data: &Weak<T>) -> bool {
-        core::ptr::eq(self.link.get_ref(), Weak::as_ptr(data))
+        core::ptr::addr_eq(self.link.get_ref(), Weak::as_ptr(data))
     }
 
     /// check if two RcuWeak instances point to the same inner Weak
     #[inline]
     pub fn ptr_eq(this: &Self, other: &Self) -> bool {
-        core::ptr::eq(this.link.get_ref(), other.link.get_ref())
+        core::ptr::addr_eq(this.link.get_ref(), other.link.get_ref())
     }
 }
