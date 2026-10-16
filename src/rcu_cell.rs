@@ -1,26 +1,63 @@
 use alloc::sync::Arc;
 use core::mem::ManuallyDrop;
-use core::ptr;
 use core::sync::atomic::Ordering;
 
 use crate::link::LinkWrapper;
 use crate::ArcPointer;
 
 #[inline]
-fn ptr_to_arc<T>(ptr: *const T) -> Option<Arc<T>> {
-    unsafe { ArcPointer::from_raw(ptr) }
+fn ptr_to_arc<T: ?Sized>(ptr: *const T) -> Option<Arc<T>> {
+    (!ptr.is_null()).then(|| unsafe { Arc::from_raw(ptr) })
 }
 
 /// RCU cell, it behaves like `RwLock<Option<Arc<T>>>`
+///
+/// # Unsized types
+///
+/// `T` may be unsized (`dyn Trait`, `[U]`, `str`), created from an existing `Arc`:
+///
+/// ```
+/// use rcu_cell::RcuCell;
+/// use std::sync::Arc;
+///
+/// trait Shape: Send + Sync {}
+/// struct Square(u32);
+/// impl Shape for Square {}
+///
+/// let a: Arc<dyn Shape> = Arc::new(Square(1));
+/// let cell: RcuCell<dyn Shape> = RcuCell::from(a);
+/// ```
+///
+/// Limitations:
+/// - Only the data address is stored atomically, the pointer metadata (vtable
+///   or length) is kept from construction. An unsized cell can't be created
+///   empty, and `none()`, `some()`, `new()` and `Default` need `T: Sized`.
+/// - Values written later must have exactly the same pointer metadata (the
+///   same slice length, or the same `dyn Trait` vtable) as the initial one,
+///   otherwise the write panics. Writing a different concrete type or length
+///   is therefore never undefined behavior, but it can't be supported.
+///   Vtable addresses are not guaranteed to be unique for a type (e.g. across
+///   codegen units), so a write of the same concrete type may also panic.
+///   Use `RcuCell<Arc<dyn Trait>>` if you need to swap implementors.
+///
+/// A write with a different pointer metadata panics:
+///
+/// ```should_panic
+/// use rcu_cell::RcuCell;
+/// use std::sync::Arc;
+///
+/// let cell: RcuCell<[u8]> = RcuCell::from(Arc::<[u8]>::from(&[1, 2, 3][..]));
+/// cell.write(Arc::<[u8]>::from(&[1, 2][..]));
+/// ```
 #[derive(Debug)]
-pub struct RcuCell<T> {
+pub struct RcuCell<T: ?Sized> {
     link: LinkWrapper<T>,
 }
 
-unsafe impl<T: Send + Sync> Send for RcuCell<T> {}
-unsafe impl<T: Send + Sync> Sync for RcuCell<T> {}
+unsafe impl<T: ?Sized + Send + Sync> Send for RcuCell<T> {}
+unsafe impl<T: ?Sized + Send + Sync> Sync for RcuCell<T> {}
 
-impl<T> Drop for RcuCell<T> {
+impl<T: ?Sized> Drop for RcuCell<T> {
     fn drop(&mut self) {
         let ptr = self.link.get_ref();
         let _ = ptr_to_arc(ptr);
@@ -33,7 +70,7 @@ impl<T> Default for RcuCell<T> {
     }
 }
 
-impl<T> From<Arc<T>> for RcuCell<T> {
+impl<T: ?Sized> From<Arc<T>> for RcuCell<T> {
     fn from(data: Arc<T>) -> Self {
         let arc_ptr = Arc::into_raw(data);
         RcuCell {
@@ -78,6 +115,9 @@ impl<T> RcuCell<T> {
             None => Self::none(),
         }
     }
+}
+
+impl<T: ?Sized> RcuCell<T> {
 
     /// convert the rcu cell to an Arc value
     #[inline]
@@ -97,8 +137,19 @@ impl<T> RcuCell<T> {
     /// write an option arc value to the rcu cell and return the old value
     #[inline]
     pub fn set(&self, data: Option<Arc<T>>) -> Option<Arc<T>> {
-        let new_ptr = data.into_raw();
+        let new_ptr = self.arc_to_ptr(data);
         ptr_to_arc(self.link.update(new_ptr))
+    }
+
+    #[inline]
+    fn arc_to_ptr(&self, data: Option<Arc<T>>) -> *const T {
+        match data {
+            Some(data) => {
+                self.link.check_meta(Arc::as_ptr(&data));
+                Arc::into_raw(data)
+            }
+            None => self.link.null(),
+        }
     }
 
     /// take the value from the rcu cell, leave the rcu cell empty
@@ -125,13 +176,19 @@ impl<T> RcuCell<T> {
     {
         // increase ref count to lock the inner Arc
         let ptr = self.link.lock_read();
-        let old_value = ptr_to_arc(ptr);
-        let new_ptr = match f(old_value.clone()) {
-            Some(data) => Arc::into_raw(data.into()),
-            None => ptr::null_mut(),
+        // the cell still owns this Arc until the update is done, so a panic
+        // in `f` or in the metadata check must not drop it
+        let old_value = ManuallyDrop::new(ptr_to_arc(ptr));
+        let new_ptr = match f((*old_value).clone()) {
+            Some(data) => {
+                let data = data.into();
+                self.link.check_meta(Arc::as_ptr(&data));
+                Arc::into_raw(data)
+            }
+            None => self.link.null(),
         };
         self.link.unlock_update(new_ptr);
-        old_value
+        ManuallyDrop::into_inner(old_value)
     }
 
     /// Stores the optional Arc ref `new` into the RcuCell if the current
@@ -179,8 +236,12 @@ impl<T> RcuCell<T> {
         T: 'a,
     {
         let new_ptr = match new {
-            Some(data) => Arc::as_ptr(data),
-            None => ptr::null(),
+            Some(data) => {
+                let ptr = Arc::as_ptr(data);
+                self.link.check_meta(ptr);
+                ptr
+            }
+            None => self.link.null(),
         };
 
         self.link

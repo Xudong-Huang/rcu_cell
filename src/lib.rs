@@ -206,4 +206,140 @@ mod test {
         assert!(res2.is_ok());
         assert_eq!(a.read().map(|v| *v), Some(5678));
     }
+
+    // Miri gives every unsizing its own vtable, which makes the exact vtable check panic
+    #[cfg(not(miri))]
+    #[test]
+    fn test_unsized() {
+        trait B: Send + Sync {
+            fn id(&self) -> u32;
+        }
+        struct A(u32);
+        impl B for A {
+            fn id(&self) -> u32 {
+                self.0
+            }
+        }
+        fn mk(v: u32) -> Arc<dyn B> {
+            Arc::new(A(v))
+        }
+        let c: RcuCell<dyn B> = RcuCell::from(mk(7));
+        assert_eq!(c.read().unwrap().id(), 7);
+        let old = c.write(mk(8)).unwrap();
+        assert_eq!(old.id(), 7);
+        assert_eq!(c.read().unwrap().id(), 8);
+        assert!(c.take().is_some());
+        assert!(c.is_none());
+        assert!(c.read().is_none());
+
+        let s: RcuCell<[u8]> = RcuCell::from(Arc::<[u8]>::from(&[1u8, 2, 3][..]));
+        assert_eq!(&*s.read().unwrap(), &[1, 2, 3]);
+    }
+
+    // Miri gives every unsizing its own vtable, which makes the exact vtable check panic
+    #[cfg(not(miri))]
+    #[test]
+    fn test_unsized_weak() {
+        use super::RcuWeak;
+        use alloc::sync::Weak;
+        trait B: Send + Sync {
+            fn id(&self) -> u32;
+        }
+        struct A(u32);
+        impl B for A {
+            fn id(&self) -> u32 {
+                self.0
+            }
+        }
+        fn mk(v: u32) -> Arc<dyn B> {
+            Arc::new(A(v))
+        }
+        let a1 = mk(1);
+        let a2 = mk(2);
+        let w: RcuWeak<dyn B> = RcuWeak::from(Arc::downgrade(&a1));
+        assert_eq!(w.upgrade().unwrap().id(), 1);
+        assert!(w.arc_eq(&a1));
+        let old = w.write_arc(&a2);
+        assert_eq!(old.upgrade().unwrap().id(), 1);
+        assert_eq!(w.upgrade().unwrap().id(), 2);
+        assert!(w.take().upgrade().is_some());
+        assert!(w.upgrade().is_none());
+        assert!(w.read().upgrade().is_none());
+        w.write_arc(&a1);
+        assert_eq!(w.upgrade().unwrap().id(), 1);
+        drop(a1);
+        assert!(w.upgrade().is_none());
+
+        let dangling: Weak<dyn B> = Weak::<A>::new();
+        let w2: RcuWeak<dyn B> = RcuWeak::from(dangling);
+        assert!(w2.upgrade().is_none());
+    }
+
+    trait Id: Send + Sync {
+        #[allow(dead_code)]
+        fn id(&self) -> u32;
+    }
+    struct Small(u32);
+    struct Big(u32, u64);
+    impl Id for Small {
+        fn id(&self) -> u32 {
+            self.0
+        }
+    }
+    impl Id for Big {
+        fn id(&self) -> u32 {
+            self.0 | (self.1 as u32)
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "pointer metadata")]
+    fn test_cell_slice_len_changed_write() {
+        let c: RcuCell<[u8]> = RcuCell::from(Arc::<[u8]>::from(&[1u8, 2, 3][..]));
+        c.write(Arc::<[u8]>::from(&[1u8, 2][..]));
+    }
+
+    #[test]
+    #[should_panic(expected = "pointer metadata")]
+    fn test_cell_dyn_layout_changed_write() {
+        let c: RcuCell<dyn Id> = RcuCell::from(Arc::new(Small(1)) as Arc<dyn Id>);
+        c.write(Arc::new(Big(2, 3)) as Arc<dyn Id>);
+    }
+
+    #[test]
+    #[should_panic(expected = "pointer metadata")]
+    fn test_cell_dyn_layout_changed_update() {
+        let c: RcuCell<dyn Id> = RcuCell::from(Arc::new(Small(1)) as Arc<dyn Id>);
+        c.update(|_| Some(Arc::new(Big(2, 3)) as Arc<dyn Id>));
+    }
+
+    #[test]
+    #[should_panic(expected = "pointer metadata")]
+    fn test_cell_dyn_layout_changed_compare_exchange() {
+        use Ordering::SeqCst;
+        let c: RcuCell<dyn Id> = RcuCell::from(Arc::new(Small(1)) as Arc<dyn Id>);
+        let cur = Arc::as_ptr(&c.read().unwrap());
+        let new = Arc::new(Big(2, 3)) as Arc<dyn Id>;
+        let _ = unsafe { c.compare_exchange(cur, Some(&new), SeqCst, SeqCst) };
+    }
+
+    #[test]
+    #[should_panic(expected = "pointer metadata")]
+    fn test_weak_slice_len_changed_write() {
+        use super::RcuWeak;
+        let a: Arc<[u8]> = Arc::from(&[1u8, 2, 3][..]);
+        let b: Arc<[u8]> = Arc::from(&[1u8, 2][..]);
+        let w = RcuWeak::from(Arc::downgrade(&a));
+        w.write_arc(&b);
+    }
+
+    #[test]
+    #[should_panic(expected = "pointer metadata")]
+    fn test_weak_dyn_layout_changed_write() {
+        use super::RcuWeak;
+        let a = Arc::new(Small(1)) as Arc<dyn Id>;
+        let b = Arc::new(Big(2, 3)) as Arc<dyn Id>;
+        let w = RcuWeak::from(Arc::downgrade(&a));
+        w.write(Arc::downgrade(&b));
+    }
 }

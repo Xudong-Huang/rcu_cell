@@ -36,3 +36,10 @@ A lockless rcu cell implementation that can be used safely in multithread contex
     let d3 = t2.read().unwrap();
     assert_eq!(*d3, 42);
 ```
+
+## Unsized types
+
+`RcuCell<T>` and `RcuWeak<T>` accept unsized `T` (`dyn Trait`, `[U]`, `str`), created from an existing `Arc`/`Weak`, e.g. `RcuCell::from(Arc::new(A) as Arc<dyn B>)`.
+
+- The pointer metadata (vtable or length) is kept from construction; an unsized cell can't be created empty.
+- Later writes must have exactly the same pointer metadata (slice length or `dyn` vtable) as the initial value, otherwise they panic. This keeps the API sound, but vtable addresses are not guaranteed to be unique for a type, so a write of the same concrete type may also panic spuriously. Use `RcuCell<Arc<dyn Trait>>` if you need to swap implementors.

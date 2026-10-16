@@ -12,18 +12,15 @@ const UPDTATE_MASK: usize = 1 << (LEADING_BITS + ALIGN_BITS - 1);
 const UPDATE_REF_MASK: usize = REFCOUNT_MASK & !UPDTATE_MASK;
 
 #[inline]
-fn ptr_to_addr<T>(ptr: *const T) -> usize {
-    ptr.expose_provenance()
-}
-
-#[inline]
-fn addr_to_ptr<T>(addr: usize) -> *const T {
-    core::ptr::with_exposed_provenance(addr)
+fn ptr_to_addr<T: ?Sized>(ptr: *const T) -> usize {
+    ptr.cast::<()>().expose_provenance()
 }
 
 /// A wrapper of the pointer to the inner Arc data
-pub(crate) struct LinkWrapper<T> {
+pub(crate) struct LinkWrapper<T: ?Sized> {
     ptr: AtomicUsize,
+    // the pointer metadata (vtable or length) of unsized `T`, it never changes
+    template: *const T,
     phantom: PhantomData<*const T>,
 }
 
@@ -32,8 +29,43 @@ impl<T> LinkWrapper<T> {
     pub(crate) const fn new() -> Self {
         LinkWrapper {
             ptr: AtomicUsize::new(0),
+            template: core::ptr::null(),
             phantom: PhantomData,
         }
+    }
+}
+
+impl<T: ?Sized> LinkWrapper<T> {
+    // rebuild a pointer from an address, the metadata is taken from the template
+    #[inline]
+    fn addr_to_ptr(&self, addr: usize) -> *const T {
+        let thin: *const () = core::ptr::with_exposed_provenance(addr);
+        let mut ptr = self.template;
+        // the data address is the first word of a (fat) pointer
+        unsafe { *(&mut ptr as *mut *const T as *mut *const ()) = thin };
+        ptr
+    }
+
+    /// a null pointer that carries the metadata of this link
+    #[inline]
+    pub(crate) fn null(&self) -> *const T {
+        self.addr_to_ptr(0)
+    }
+
+    /// panic if the pointer metadata (vtable or length) differs from the one this
+    /// link was built with, otherwise a reader would pair the new address with a
+    /// wrong metadata. Vtable addresses are not guaranteed to be unique for a type,
+    /// so this may panic for a valid value, but it never accepts a wrong one.
+    #[inline]
+    #[allow(ambiguous_wide_pointer_comparisons)]
+    pub(crate) fn check_meta(&self, ptr: *const T) {
+        if self.template.is_null() {
+            return;
+        }
+        assert!(
+            core::ptr::eq(ptr, self.addr_to_ptr(ptr_to_addr(ptr))),
+            "the pointer metadata must be the same as the one the cell was created with"
+        );
     }
 
     #[inline]
@@ -43,6 +75,7 @@ impl<T> LinkWrapper<T> {
         debug_assert!(addr & HIGHER_MASK == 0);
         LinkWrapper {
             ptr: AtomicUsize::new(addr << LEADING_BITS),
+            template: ptr,
             phantom: PhantomData,
         }
     }
@@ -70,7 +103,7 @@ impl<T> LinkWrapper<T> {
                 Err(addr) => {
                     let addr = (addr & !REFCOUNT_MASK) >> LEADING_BITS;
                     if addr != old {
-                        return Err(addr_to_ptr(addr));
+                        return Err(self.addr_to_ptr(addr));
                     }
                     backoff.snooze();
                 }
@@ -95,7 +128,7 @@ impl<T> LinkWrapper<T> {
 
         core::sync::atomic::fence(Ordering::Acquire);
         let addr = old >> LEADING_BITS;
-        addr_to_ptr(addr)
+        self.addr_to_ptr(addr)
     }
 
     // this is only used after lock_read
@@ -116,7 +149,7 @@ impl<T> LinkWrapper<T> {
 
         core::sync::atomic::fence(Ordering::Acquire);
         let addr = (old & !UPDTATE_MASK) >> LEADING_BITS;
-        addr_to_ptr(addr)
+        self.addr_to_ptr(addr)
     }
 
     #[inline]
@@ -130,14 +163,14 @@ impl<T> LinkWrapper<T> {
         let refs = addr & REFCOUNT_MASK;
         assert!(refs < REFCOUNT_MASK, "Too many references");
         let addr = (addr & !REFCOUNT_MASK) >> LEADING_BITS;
-        addr_to_ptr(addr)
+        self.addr_to_ptr(addr)
     }
 
     #[inline]
     pub(crate) fn get_ref(&self) -> *const T {
         let addr = self.ptr.load(Ordering::Acquire);
         let addr = (addr & !REFCOUNT_MASK) >> LEADING_BITS;
-        addr_to_ptr(addr)
+        self.addr_to_ptr(addr)
     }
 
     #[inline]
@@ -169,11 +202,11 @@ impl<T> LinkWrapper<T> {
         core::sync::atomic::fence(Ordering::Acquire);
 
         let addr = (old & !REFCOUNT_MASK) >> LEADING_BITS;
-        addr_to_ptr(addr)
+        self.addr_to_ptr(addr)
     }
 }
 
-impl<T: fmt::Debug> fmt::Debug for LinkWrapper<T> {
+impl<T: ?Sized + fmt::Debug> fmt::Debug for LinkWrapper<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let ptr = self.get_ref();
         f.debug_struct("Link").field("ptr", &ptr).finish()
