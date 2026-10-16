@@ -46,8 +46,10 @@ impl<T> ArcPointer<T> for Option<Arc<T>> {
 
 #[cfg(test)]
 mod test {
+    extern crate std;
     use super::RcuCell;
     use alloc::sync::Arc;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
     use core::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
@@ -207,6 +209,8 @@ mod test {
         assert_eq!(a.read().map(|v| *v), Some(5678));
     }
 
+    // Miri gives every unsizing its own vtable, which the fallback exact vtable check rejects
+    #[cfg(not(miri))]
     #[test]
     fn test_unsized() {
         trait B: Send + Sync {
@@ -234,6 +238,8 @@ mod test {
         assert_eq!(&*s.read().unwrap(), &[1, 2, 3]);
     }
 
+    // Miri gives every unsizing its own vtable, which the fallback exact vtable check rejects
+    #[cfg(not(miri))]
     #[test]
     fn test_unsized_weak() {
         use super::RcuWeak;
@@ -283,14 +289,23 @@ mod test {
     }
     impl Id for Big {
         fn id(&self) -> u32 {
-            self.0 + 100
+            self.0 + 100 + self.1 as u32 * 0
         }
     }
+
+    use crate::link::WIDE_ATOMIC;
 
     #[test]
     fn test_cell_slice_len_changed() {
         let c: RcuCell<[u8]> = RcuCell::from(Arc::<[u8]>::from(&[1u8, 2, 3][..]));
-        let old = c.write(Arc::<[u8]>::from(&[4u8, 5][..])).unwrap();
+        let short = Arc::<[u8]>::from(&[4u8, 5][..]);
+        if !WIDE_ATOMIC {
+            let r = catch_unwind(AssertUnwindSafe(|| c.write(short)));
+            assert!(r.is_err());
+            assert_eq!(&*c.read().unwrap(), &[1, 2, 3]);
+            return;
+        }
+        let old = c.write(short).unwrap();
         assert_eq!(&*old, &[1, 2, 3]);
         assert_eq!(&*c.read().unwrap(), &[4, 5]);
         assert_eq!(&*c.take().unwrap(), &[4, 5]);
@@ -303,6 +318,19 @@ mod test {
     fn test_cell_dyn_swap_implementors() {
         let c: RcuCell<dyn Id> = RcuCell::from(Arc::new(Small(1)) as Arc<dyn Id>);
         assert_eq!(c.read().unwrap().id(), 1);
+        if !WIDE_ATOMIC {
+            // writes with a different vtable are rejected, never accepted
+            let r = catch_unwind(AssertUnwindSafe(|| {
+                c.write(Arc::new(Big(2, 3)) as Arc<dyn Id>)
+            }));
+            assert!(r.is_err());
+            let r = catch_unwind(AssertUnwindSafe(|| {
+                c.update(|_| Some(Arc::new(Big(2, 3)) as Arc<dyn Id>))
+            }));
+            assert!(r.is_err());
+            assert_eq!(c.read().unwrap().id(), 1);
+            return;
+        }
         assert_eq!(c.write(Arc::new(Big(2, 3)) as Arc<dyn Id>).unwrap().id(), 1);
         assert_eq!(c.read().unwrap().id(), 102);
         let old = c.update(|old| {
@@ -323,6 +351,14 @@ mod test {
         let c: RcuCell<dyn Id> = RcuCell::from(Arc::new(Small(1)) as Arc<dyn Id>);
         let cur = Arc::as_ptr(&c.read().unwrap());
         let new = Arc::new(Big(2, 3)) as Arc<dyn Id>;
+        if !WIDE_ATOMIC {
+            let r = catch_unwind(AssertUnwindSafe(|| unsafe {
+                c.compare_exchange(cur, Some(&new), SeqCst, SeqCst)
+            }));
+            assert!(r.is_err());
+            assert_eq!(c.read().unwrap().id(), 1);
+            return;
+        }
         assert!(unsafe { c.compare_exchange(cur, Some(&new), SeqCst, SeqCst) }.is_ok());
         assert_eq!(c.read().unwrap().id(), 102);
         assert!(c.arc_eq(&new));
@@ -340,6 +376,12 @@ mod test {
         let b = Arc::new(Big(2, 3)) as Arc<dyn Id>;
         let w = RcuWeak::from(Arc::downgrade(&a));
         assert_eq!(w.upgrade().unwrap().id(), 1);
+        if !WIDE_ATOMIC {
+            let r = catch_unwind(AssertUnwindSafe(|| w.write(Arc::downgrade(&b))));
+            assert!(r.is_err());
+            assert_eq!(w.upgrade().unwrap().id(), 1);
+            return;
+        }
         w.write(Arc::downgrade(&b));
         assert_eq!(w.upgrade().unwrap().id(), 102);
         w.write_arc(&a);
@@ -349,6 +391,9 @@ mod test {
     #[test]
     fn test_dyn_concurrent_swap() {
         extern crate std;
+        if !WIDE_ATOMIC {
+            return;
+        }
         const N: u64 = if cfg!(miri) { 50 } else { 20000 };
         let c: Arc<RcuCell<dyn Id>> = Arc::new(RcuCell::from(Arc::new(Small(1)) as Arc<dyn Id>));
         let writer = {

@@ -32,12 +32,18 @@ fn ptr_to_arc<T: ?Sized>(ptr: *const T) -> Option<Arc<T>> {
 /// - An unsized cell can't be created empty (there is no metadata to start
 ///   with), so `none()`, `some()`, `new()` and `Default` need `T: Sized`. It can
 ///   be emptied later with `take()` and written again.
-/// - The data address and the pointer metadata (vtable or length) are stored in
-///   one 128-bit atomic, so values with different concrete types or lengths can
-///   be swapped freely. This relies on `portable-atomic`: it is lock-free where
-///   the target has native 128-bit atomics (e.g. x86-64 with `cmpxchg16b`,
-///   aarch64), otherwise it falls back to a spin lock inside the atomic.
-/// - Sized cells keep using a single `AtomicUsize`, so they pay nothing for this.
+/// - Values written later need the same pointer metadata (the slice length or
+///   the `dyn Trait` vtable) as the initial one, otherwise the write panics.
+///   It is never undefined behavior, but the vtable address of a type is not
+///   guaranteed to be unique (e.g. across codegen units), so writing the same
+///   concrete type may also panic.
+/// - On `x86_64` with the `cmpxchg16b` target feature enabled statically (e.g.
+///   `RUSTFLAGS="-C target-cpu=native"` or `-C target-feature=+cmpxchg16b`) the
+///   address and the metadata are stored in one lock-free 128-bit atomic, then
+///   values with different concrete types or lengths can be swapped freely and
+///   the metadata check above doesn't apply. Other targets (and Miri) use the
+///   metadata check.
+/// - Sized cells always use a single `AtomicUsize`, they pay nothing for this.
 #[derive(Debug)]
 pub struct RcuCell<T: ?Sized> {
     link: LinkWrapper<T>,
@@ -133,7 +139,10 @@ impl<T: ?Sized> RcuCell<T> {
     #[inline]
     fn arc_to_ptr(&self, data: Option<Arc<T>>) -> *const T {
         match data {
-            Some(data) => Arc::into_raw(data),
+            Some(data) => {
+                self.link.check_meta(Arc::as_ptr(&data));
+                Arc::into_raw(data)
+            }
             None => self.link.null(),
         }
     }
@@ -166,7 +175,11 @@ impl<T: ?Sized> RcuCell<T> {
         // in `f` or in the metadata check must not drop it
         let old_value = ManuallyDrop::new(ptr_to_arc(ptr));
         let new_ptr = match f((*old_value).clone()) {
-            Some(data) => Arc::into_raw(data.into()),
+            Some(data) => {
+                let data = data.into();
+                self.link.check_meta(Arc::as_ptr(&data));
+                Arc::into_raw(data)
+            }
             None => self.link.null(),
         };
         self.link.unlock_update(new_ptr);
@@ -218,7 +231,11 @@ impl<T: ?Sized> RcuCell<T> {
         T: 'a,
     {
         let new_ptr = match new {
-            Some(data) => Arc::as_ptr(data),
+            Some(data) => {
+                let ptr = Arc::as_ptr(data);
+                self.link.check_meta(ptr);
+                ptr
+            }
             None => self.link.null(),
         };
 
