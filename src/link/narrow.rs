@@ -101,6 +101,9 @@ impl<T: ?Sized> LinkWrapper<T> {
         if Self::IS_THIN {
             return;
         }
+        // the stored metadata is shifted by one so 0 can mean "not set yet", a real
+        // metadata may be 0 (an empty slice). `wrapping_add` is fine: only usize::MAX wraps
+        // to 0, which a vtable address or slice length can never be. Read back with `checked_sub(1)`.
         let meta = Self::meta_of(ptr).wrapping_add(1);
         let cur = match self
             .meta
@@ -120,6 +123,7 @@ impl<T: ?Sized> LinkWrapper<T> {
         let addr = Self::opt_addr(ptr);
         debug_assert!(addr & LOWER_MASK == 0);
         debug_assert!(addr & HIGHER_MASK == 0);
+        // metadata is stored plus one, see `check_meta`
         let meta = match ptr {
             Some(p) if !Self::IS_THIN => Self::meta_of(p.as_ptr()).wrapping_add(1),
             _ => 0,

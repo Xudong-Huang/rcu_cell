@@ -85,6 +85,9 @@ impl<T: ?Sized> LinkWrapper<T> {
         }
         // the data address is the first word of a fat pointer, the metadata is the second
         let words = unsafe { core::mem::transmute_copy::<*const T, [*const (); 2]>(&ptr) };
+        // the stored metadata is shifted by one so 0 can mean "not set yet", a real
+        // metadata may be 0 (an empty slice). `wrapping_add` is fine: only usize::MAX wraps
+        // to 0, which a vtable address or slice length can never be. Read back with `checked_sub(1)`.
         (addr, words[1].expose_provenance().wrapping_add(1))
     }
 
