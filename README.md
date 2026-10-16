@@ -17,6 +17,7 @@ A lockless rcu cell implementation that can be used safely in multithread contex
 - The write operation is something like Atomic Swap.
 - The RcuCell could contain no data
 - Could be compiled with no_std
+- Only 64-bit platforms are supported (the pointer and tag bits are packed into one word), building for a 32-bit target fails with a compile error
 
 
 ## Usage
