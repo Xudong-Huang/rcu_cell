@@ -8,7 +8,7 @@ categories = ["concurrency", "data-structures", "no-std"]
 keywords = ["rcu", "lockless", "atomic"]
 repository = "https://github.com/Xudong-Huang/rcu_cell"
 documentation = "https://docs.rs/rcu_cell"
-license = "LGPL-3.0"
+license = "MIT"
 readme = "./README.md"
 exclude = [".gitignore", "benches/**"]
 
