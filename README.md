@@ -72,6 +72,35 @@ A lockless rcu cell implementation that can be used safely in multithread contex
     assert_eq!(empty.read().unwrap().area(), 4);
 ```
 
+Writing a value of a *different* concrete type (e.g. a `Circle` into a cell holding a `Square`) needs the 128-bit atomic described below, otherwise the write panics. So this example is only compiled, not run:
+
+```rust,no_run
+    use rcu_cell::RcuCell;
+    use std::sync::Arc;
+
+    trait Shape: Send + Sync {
+        fn area(&self) -> u32;
+    }
+    struct Square(u32);
+    struct Circle(u32);
+    impl Shape for Square {
+        fn area(&self) -> u32 {
+            self.0 * self.0
+        }
+    }
+    impl Shape for Circle {
+        fn area(&self) -> u32 {
+            3 * self.0 * self.0
+        }
+    }
+
+    let cell: RcuCell<dyn Shape> = RcuCell::from(Arc::new(Square(3)) as Arc<dyn Shape>);
+    // the vtable changes together with the address
+    let old = cell.write(Arc::new(Circle(2)) as Arc<dyn Shape>);
+    assert_eq!(old.unwrap().area(), 9);
+    assert_eq!(cell.read().unwrap().area(), 12);
+```
+
 - `some()` and `new()` need `T: Sized`. An unsized cell is created from an existing `Arc`/`Weak`, or empty with `none()`/`Default`; an empty unsized cell has no pointer metadata yet, the first value written decides it. `RcuWeak::read/take/write/into_weak` and `RcuCell::compare_exchange` need a valid `*const T`/`Weak<T>` to return, so they panic on a cell that never held an unsized value (`upgrade`/`read` of `RcuCell` are fine).
 - By default later writes need the same pointer metadata (slice length or `dyn` vtable) as the first value, otherwise they panic. This is never undefined behavior, but vtable addresses are not guaranteed to be unique for a type, so writing the same concrete type may also panic.
 - With a nightly compiler, on targets that have 128-bit atomics (`target_has_atomic = "128"`, e.g. aarch64 and s390x, but not x86_64) the address and the metadata live in one `core::sync::atomic::AtomicU128`, so different concrete types or lengths can be swapped freely and the check doesn't apply. `build.rs` detects this automatically, there is nothing to enable.
