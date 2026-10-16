@@ -4,7 +4,11 @@ use core::mem::ManuallyDrop;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+#[cfg(rcu_cell_atomic_u128)]
 use core::sync::atomic::AtomicU128;
+
+#[cfg(not(rcu_cell_atomic_u128))]
+use super::atomic128::AtomicU128;
 
 const LEADING_BITS: usize = 8;
 const ALIGN_BITS: usize = 3;
