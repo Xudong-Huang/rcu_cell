@@ -36,10 +36,16 @@ impl<T> LinkWrapper<T> {
 }
 
 impl<T: ?Sized> LinkWrapper<T> {
+    const IS_THIN: bool = core::mem::size_of::<*const T>() == core::mem::size_of::<usize>();
+
     // rebuild a pointer from an address, the metadata is taken from the template
     #[inline]
     fn addr_to_ptr(&self, addr: usize) -> *const T {
         let thin: *const () = core::ptr::with_exposed_provenance(addr);
+        if Self::IS_THIN {
+            // sized `T` has no metadata, skip reading the template
+            return unsafe { core::mem::transmute_copy::<*const (), *const T>(&thin) };
+        }
         let mut ptr = self.template;
         // the data address is the first word of a (fat) pointer
         unsafe { *(&mut ptr as *mut *const T as *mut *const ()) = thin };
@@ -59,7 +65,7 @@ impl<T: ?Sized> LinkWrapper<T> {
     #[inline]
     #[allow(ambiguous_wide_pointer_comparisons)]
     pub(crate) fn check_meta(&self, ptr: *const T) {
-        if self.template.is_null() {
+        if Self::IS_THIN || self.template.is_null() {
             return;
         }
         assert!(
