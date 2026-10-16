@@ -290,7 +290,8 @@ mod test {
     }
     impl Id for Big {
         fn id(&self) -> u32 {
-            self.0 + 100 + self.1 as u32 * 0
+            let _ = self.1;
+            self.0 + 100
         }
     }
 

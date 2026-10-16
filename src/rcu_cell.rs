@@ -4,7 +4,6 @@ use core::ptr::NonNull;
 use core::sync::atomic::Ordering;
 
 use crate::link::LinkWrapper;
-use crate::ArcPointer;
 
 #[inline]
 fn ptr_to_arc<T: ?Sized>(ptr: Option<NonNull<T>>) -> Option<Arc<T>> {
