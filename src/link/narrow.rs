@@ -1,5 +1,6 @@
+use core::cell::UnsafeCell;
 use core::fmt;
-use core::marker::PhantomData;
+use core::mem::MaybeUninit;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -18,12 +19,13 @@ fn ptr_to_addr<T: ?Sized>(ptr: *const T) -> usize {
 }
 
 /// A wrapper of the pointer to the inner Arc data
+///
+/// The storage has the size of a `*const T`: one word for a sized `T`, two for an unsized
+/// one. The first word is the tagged address, the second word (unsized only) is the
+/// pointer metadata (vtable or length) plus one, 0 means it is not set yet. It is set once
+/// by the first value written and never changes.
 pub(crate) struct LinkWrapper<T: ?Sized> {
-    ptr: AtomicUsize,
-    // the pointer metadata (vtable or length) of unsized `T` plus one, 0 means it is
-    // not set yet. It is set once by the first value written and never changes.
-    meta: AtomicUsize,
-    phantom: PhantomData<*const T>,
+    words: UnsafeCell<MaybeUninit<*const T>>,
 }
 
 impl<T: ?Sized> LinkWrapper<T> {
@@ -32,10 +34,21 @@ impl<T: ?Sized> LinkWrapper<T> {
     #[inline]
     pub(crate) const fn new() -> Self {
         LinkWrapper {
-            ptr: AtomicUsize::new(0),
-            meta: AtomicUsize::new(0),
-            phantom: PhantomData,
+            words: UnsafeCell::new(MaybeUninit::zeroed()),
         }
+    }
+
+    // the tagged address word
+    #[inline]
+    fn ptr(&self) -> &AtomicUsize {
+        unsafe { AtomicUsize::from_ptr(self.words.get().cast::<usize>()) }
+    }
+
+    // the metadata word, only exists for an unsized `T`
+    #[inline]
+    fn meta(&self) -> &AtomicUsize {
+        debug_assert!(!Self::IS_THIN);
+        unsafe { AtomicUsize::from_ptr(self.words.get().cast::<usize>().add(1)) }
     }
 
     // the metadata word of a fat pointer, the data address is the first word
@@ -58,7 +71,7 @@ impl<T: ?Sized> LinkWrapper<T> {
         if Self::IS_THIN {
             return Some(unsafe { core::mem::transmute_copy::<*const (), *const T>(&thin) });
         }
-        let meta = self.meta.load(Ordering::Acquire).checked_sub(1)?;
+        let meta = self.meta().load(Ordering::Acquire).checked_sub(1)?;
         let words = [thin, core::ptr::with_exposed_provenance(meta)];
         Some(unsafe { core::mem::transmute_copy::<[*const (); 2], *const T>(&words) })
     }
@@ -106,7 +119,7 @@ impl<T: ?Sized> LinkWrapper<T> {
         // to 0, which a vtable address or slice length can never be. Read back with `checked_sub(1)`.
         let meta = Self::meta_of(ptr).wrapping_add(1);
         let cur = match self
-            .meta
+            .meta()
             .compare_exchange(0, meta, Ordering::AcqRel, Ordering::Acquire)
         {
             Ok(_) => return,
@@ -128,11 +141,12 @@ impl<T: ?Sized> LinkWrapper<T> {
             Some(p) if !Self::IS_THIN => Self::meta_of(p.as_ptr()).wrapping_add(1),
             _ => 0,
         };
-        LinkWrapper {
-            ptr: AtomicUsize::new(addr << LEADING_BITS),
-            meta: AtomicUsize::new(meta),
-            phantom: PhantomData,
+        let link = Self::new();
+        link.ptr().store(addr << LEADING_BITS, Ordering::Relaxed);
+        if !Self::IS_THIN {
+            link.meta().store(meta, Ordering::Relaxed);
         }
+        link
     }
 
     pub(crate) unsafe fn compare_exchange(
@@ -150,14 +164,15 @@ impl<T: ?Sized> LinkWrapper<T> {
 
         let backoff = crossbeam_utils::Backoff::new();
         loop {
-            match self.ptr.compare_exchange(old, new, success, failure) {
+            match self.ptr().compare_exchange(old, new, success, failure) {
                 Ok(_addr) => {
                     // assert_eq!(old, addr);
                     return Ok(current);
                 }
                 Err(addr) => {
                     let addr = (addr & !REFCOUNT_MASK) >> LEADING_BITS;
-                    if addr != old {
+                    // the failure may only be the reader count, in which case retry
+                    if addr != old_addr {
                         return Err(self.addr_to_ptr(addr));
                     }
                     backoff.snooze();
@@ -172,11 +187,11 @@ impl<T: ?Sized> LinkWrapper<T> {
         debug_assert!(addr & LOWER_MASK == 0);
         debug_assert!(addr & HIGHER_MASK == 0);
         let new = addr << LEADING_BITS;
-        let mut old = self.ptr.load(Relaxed) & !REFCOUNT_MASK;
+        let mut old = self.ptr().load(Relaxed) & !REFCOUNT_MASK;
 
         let backoff = crossbeam_utils::Backoff::new();
         // wait all reader release
-        while let Err(addr) = self.ptr.compare_exchange_weak(old, new, Release, Relaxed) {
+        while let Err(addr) = self.ptr().compare_exchange_weak(old, new, Release, Relaxed) {
             old = addr & !REFCOUNT_MASK;
             backoff.snooze();
         }
@@ -193,11 +208,11 @@ impl<T: ?Sized> LinkWrapper<T> {
         debug_assert!(addr & LOWER_MASK == 0);
         debug_assert!(addr & HIGHER_MASK == 0);
         let new = addr << LEADING_BITS;
-        let mut old = self.ptr.load(Relaxed) & !UPDATE_REF_MASK | UPDTATE_MASK;
+        let mut old = self.ptr().load(Relaxed) & !UPDATE_REF_MASK | UPDTATE_MASK;
 
         let backoff = crossbeam_utils::Backoff::new();
         // wait all reader release
-        while let Err(addr) = self.ptr.compare_exchange_weak(old, new, Release, Relaxed) {
+        while let Err(addr) = self.ptr().compare_exchange_weak(old, new, Release, Relaxed) {
             old = addr & !UPDATE_REF_MASK | UPDTATE_MASK;
             backoff.snooze();
         }
@@ -209,12 +224,12 @@ impl<T: ?Sized> LinkWrapper<T> {
 
     #[inline]
     pub(crate) fn is_none(&self) -> bool {
-        self.ptr.load(Ordering::Relaxed) & !REFCOUNT_MASK == 0
+        self.ptr().load(Ordering::Relaxed) & !REFCOUNT_MASK == 0
     }
 
     #[inline]
     pub(crate) fn inc_ref(&self) -> Option<NonNull<T>> {
-        let addr = self.ptr.fetch_add(1, Ordering::Acquire);
+        let addr = self.ptr().fetch_add(1, Ordering::Acquire);
         let refs = addr & REFCOUNT_MASK;
         assert!(refs < REFCOUNT_MASK, "Too many references");
         let addr = (addr & !REFCOUNT_MASK) >> LEADING_BITS;
@@ -223,14 +238,14 @@ impl<T: ?Sized> LinkWrapper<T> {
 
     #[inline]
     pub(crate) fn get_ref(&self) -> Option<NonNull<T>> {
-        let addr = self.ptr.load(Ordering::Acquire);
+        let addr = self.ptr().load(Ordering::Acquire);
         let addr = (addr & !REFCOUNT_MASK) >> LEADING_BITS;
         self.addr_to_ptr(addr)
     }
 
     #[inline]
     pub(crate) fn dec_ref(&self) {
-        self.ptr.fetch_sub(1, Ordering::Release);
+        self.ptr().fetch_sub(1, Ordering::Release);
     }
 
     // read the inner Arc and increase the ref count
@@ -240,7 +255,7 @@ impl<T: ?Sized> LinkWrapper<T> {
     pub(crate) fn lock_read(&self) -> Option<NonNull<T>> {
         use Ordering::*;
 
-        let addr = self.ptr.load(Relaxed);
+        let addr = self.ptr().load(Relaxed);
         let mut old = addr & !UPDTATE_MASK; // clear the update flag
         let mut new = addr | UPDTATE_MASK; // set the update flag
 
@@ -248,7 +263,7 @@ impl<T: ?Sized> LinkWrapper<T> {
         assert!(refs < UPDATE_REF_MASK, "Too many references");
 
         let backoff = crossbeam_utils::Backoff::new();
-        while let Err(addr) = self.ptr.compare_exchange_weak(old, new, Release, Relaxed) {
+        while let Err(addr) = self.ptr().compare_exchange_weak(old, new, Release, Relaxed) {
             old = addr & !UPDTATE_MASK;
             new = addr | UPDTATE_MASK;
             backoff.snooze();

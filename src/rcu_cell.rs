@@ -20,6 +20,17 @@ fn same_addr<T: ?Sized>(a: Option<NonNull<T>>, b: Option<NonNull<T>>) -> bool {
     a.map(|p| p.cast::<()>()) == b.map(|p| p.cast::<()>())
 }
 
+struct UnlockOnPanic<'a, T: ?Sized> {
+    link: &'a LinkWrapper<T>,
+    ptr: Option<NonNull<T>>,
+}
+
+impl<T: ?Sized> Drop for UnlockOnPanic<'_, T> {
+    fn drop(&mut self) {
+        self.link.unlock_update(self.ptr);
+    }
+}
+
 /// RCU cell, it behaves like `RwLock<Option<Arc<T>>>`
 ///
 /// # Unsized types
@@ -179,11 +190,18 @@ impl<T: ?Sized> RcuCell<T> {
         // the cell still owns this Arc until the update is done, so a panic
         // in `f` or in the metadata check must not drop it
         let old_value = ManuallyDrop::new(ptr_to_arc(ptr));
+        // if `f` panics, put the old value back and release the lock, otherwise
+        // every later writer would spin forever
+        let unlock = UnlockOnPanic {
+            link: &self.link,
+            ptr,
+        };
         let new_ptr = f((*old_value).clone()).map(|data| {
             let data = data.into();
             self.link.check_meta(Arc::as_ptr(&data));
             arc_into_ptr(data)
         });
+        core::mem::forget(unlock);
         self.link.unlock_update(new_ptr);
         ManuallyDrop::into_inner(old_value)
     }

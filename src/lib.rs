@@ -465,4 +465,66 @@ mod test {
             r.join().unwrap();
         }
     }
+
+    #[test]
+    fn test_sized_cell_size() {
+        // a sized cell is a single word, only an unsized one carries the metadata
+        #[cfg(not(any(
+            rcu_cell_atomic_u128,
+            all(target_arch = "x86_64", target_feature = "cmpxchg16b", not(miri))
+        )))]
+        {
+            assert_eq!(core::mem::size_of::<RcuCell<u32>>(), 8);
+            assert_eq!(core::mem::size_of::<super::RcuWeak<u32>>(), 8);
+            assert_eq!(core::mem::size_of::<RcuCell<dyn core::any::Any>>(), 16);
+        }
+    }
+
+    // a compare_exchange with the right `current` must not fail only because readers
+    // hold the cell at that moment
+    #[test]
+    fn test_compare_exchange_with_readers() {
+        use core::sync::atomic::AtomicBool;
+        use Ordering::SeqCst;
+        let c = Arc::new(RcuCell::new(1u32));
+        let stop = Arc::new(AtomicBool::new(false));
+        let readers: std::vec::Vec<_> = (0..4)
+            .map(|_| {
+                let c = c.clone();
+                let stop = stop.clone();
+                std::thread::spawn(move || {
+                    while !stop.load(SeqCst) {
+                        let _ = c.read();
+                    }
+                })
+            })
+            .collect();
+        let rounds = if cfg!(miri) { 20 } else { 20_000 };
+        for i in 0..rounds {
+            let cur = Arc::as_ptr(&c.read().unwrap());
+            let new = Arc::new(i);
+            // nobody else writes, so it always succeeds
+            let r = unsafe { c.compare_exchange(cur, Some(&new), SeqCst, SeqCst) };
+            assert!(r.is_ok(), "spurious compare_exchange failure at {i}");
+        }
+        stop.store(true, SeqCst);
+        for r in readers {
+            r.join().unwrap();
+        }
+    }
+
+    // a panic in the update closure must not leave the cell locked
+    #[test]
+    fn test_update_panic_unlocks() {
+        let c = RcuCell::new(1);
+        let r = catch_unwind(AssertUnwindSafe(|| {
+            c.update(|_| -> Option<i32> { panic!("boom") })
+        }));
+        assert!(r.is_err());
+        // the old value is kept and the cell is still usable
+        assert_eq!(c.read().map(|v| *v), Some(1));
+        assert_eq!(c.write(2).map(|v| *v), Some(1));
+        assert_eq!(c.update(|v| v.map(|v| *v + 1)).map(|v| *v), Some(2));
+        assert_eq!(c.read().map(|v| *v), Some(3));
+    }
 }
