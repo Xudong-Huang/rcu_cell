@@ -42,36 +42,6 @@ A lockless rcu cell implementation that can be used safely in multithread contex
 
 `RcuCell<T>` and `RcuWeak<T>` accept unsized `T` (`dyn Trait`, `[U]`, `str`), created from an existing `Arc`/`Weak`, e.g. `RcuCell::from(Arc::new(A) as Arc<dyn B>)`.
 
-```rust
-    use rcu_cell::RcuCell;
-    use std::sync::Arc;
-
-    trait Shape: Send + Sync {
-        fn area(&self) -> u32;
-    }
-    struct Square(u32);
-    impl Shape for Square {
-        fn area(&self) -> u32 {
-            self.0 * self.0
-        }
-    }
-
-    // the cast to `Arc<dyn Shape>` is needed, there is no automatic coercion
-    let shape: Arc<dyn Shape> = Arc::new(Square(3));
-    let cell: RcuCell<dyn Shape> = RcuCell::from(shape.clone());
-    assert_eq!(cell.read().unwrap().area(), 9);
-
-    // write another `Arc<dyn Shape>` that shares the same vtable
-    let old = cell.write(shape);
-    assert_eq!(old.unwrap().area(), 9);
-
-    // an empty cell, the first value written decides the pointer metadata
-    let empty: RcuCell<dyn Shape> = RcuCell::none();
-    assert!(empty.read().is_none());
-    empty.write(Arc::new(Square(2)) as Arc<dyn Shape>);
-    assert_eq!(empty.read().unwrap().area(), 4);
-```
-
 Writing a value of a *different* concrete type (e.g. a `Circle` into a cell holding a `Square`) needs the 128-bit atomic described below, otherwise the write panics. So this example is only compiled, not run:
 
 ```rust,no_run
