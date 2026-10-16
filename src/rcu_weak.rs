@@ -42,17 +42,16 @@ fn is_dangling<T: ?Sized>(ptr: *const T) -> bool {
 /// - An unsized cell can't be created empty (there is no metadata to start
 ///   with), so `none()`, `some()`, `new()` and `Default` need `T: Sized`. It can
 ///   be emptied later with `take()` and written again.
-/// - Values written later need the same pointer metadata (the slice length or
+/// - By default later writes need the same pointer metadata (the slice length or
 ///   the `dyn Trait` vtable) as the initial one, otherwise the write panics.
 ///   It is never undefined behavior, but the vtable address of a type is not
 ///   guaranteed to be unique (e.g. across codegen units), so writing the same
 ///   concrete type may also panic.
-/// - On `x86_64` with the `cmpxchg16b` target feature enabled statically (e.g.
-///   `RUSTFLAGS="-C target-cpu=native"` or `-C target-feature=+cmpxchg16b`) the
-///   address and the metadata are stored in one lock-free 128-bit atomic, then
-///   values with different concrete types or lengths can be swapped freely and
-///   the metadata check above doesn't apply. Other targets (and Miri) use the
-///   metadata check.
+/// - With the `nightly` cargo feature, on targets that have 128-bit atomics
+///   (`target_has_atomic = "128"`, e.g. aarch64 and s390x, but not x86_64) the
+///   address and the metadata are stored in one `core::sync::atomic::AtomicU128`,
+///   so values with different concrete types or lengths can be swapped freely and
+///   the metadata check doesn't apply. This needs a nightly compiler.
 /// - Sized cells always use a single `AtomicUsize`, they pay nothing for this.
 #[derive(Debug)]
 pub struct RcuWeak<T: ?Sized> {

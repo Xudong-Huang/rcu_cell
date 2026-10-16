@@ -1,5 +1,9 @@
 #![doc = include_str!("../README.md")]
 #![no_std]
+#![cfg_attr(
+    all(feature = "nightly", target_has_atomic = "128"),
+    feature(integer_atomics)
+)]
 
 extern crate alloc;
 
