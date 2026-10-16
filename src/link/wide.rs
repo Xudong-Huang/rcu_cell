@@ -49,20 +49,25 @@ pub(crate) struct LinkWrapper<T: ?Sized> {
     phantom: PhantomData<*const T>,
 }
 
-impl<T> LinkWrapper<T> {
+impl<T: ?Sized> LinkWrapper<T> {
+    const IS_THIN: bool = core::mem::size_of::<*const T>() == core::mem::size_of::<usize>();
     #[inline]
     pub(crate) const fn new() -> Self {
-        LinkWrapper {
-            storage: Storage {
+        let storage = if Self::IS_THIN {
+            Storage {
                 thin: ManuallyDrop::new(AtomicUsize::new(0)),
-            },
+            }
+        } else {
+            Storage {
+                wide: ManuallyDrop::new(AtomicU128::new(0)),
+            }
+        };
+        LinkWrapper {
+            storage,
             phantom: PhantomData,
         }
     }
-}
 
-impl<T: ?Sized> LinkWrapper<T> {
-    const IS_THIN: bool = core::mem::size_of::<*const T>() == core::mem::size_of::<usize>();
     const _CHECK: () = assert!(
         Self::IS_THIN || core::mem::size_of::<*const T>() == 2 * core::mem::size_of::<usize>()
     );
@@ -174,7 +179,7 @@ impl<T: ?Sized> LinkWrapper<T> {
         Self::join((word & !REFCOUNT_MASK) >> LEADING_BITS, meta)
     }
 
-    // a null pointer that carries a valid metadata
+    // a null pointer, for an unsized `T` its metadata is not meaningful when the link is empty
     #[inline]
     pub(crate) fn null(&self) -> *const T {
         Self::join(0, self.load(Ordering::Relaxed).1)

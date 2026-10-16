@@ -347,6 +347,45 @@ mod test {
     }
 
     #[test]
+    fn test_unsized_none() {
+        use super::RcuWeak;
+        let c: RcuCell<dyn Id> = RcuCell::none();
+        assert!(c.is_none());
+        assert!(c.read().is_none());
+        assert!(c.take().is_none());
+        let d: RcuCell<[u8]> = RcuCell::default();
+        assert!(d.read().is_none());
+        assert!(d.write(Arc::<[u8]>::from(&[1u8, 2][..])).is_none());
+        assert_eq!(&*d.read().unwrap(), &[1, 2]);
+        assert!(d.take().is_some());
+        assert!(d.read().is_none());
+
+        // the first write decides the metadata
+        assert!(c.write(Arc::new(Big(1, 2)) as Arc<dyn Id>).is_none());
+        assert_eq!(c.read().unwrap().id(), 101);
+        if !WIDE_ATOMIC {
+            let r = catch_unwind(AssertUnwindSafe(|| {
+                c.write(Arc::new(Small(1)) as Arc<dyn Id>)
+            }));
+            assert!(r.is_err());
+        } else {
+            c.write(Arc::new(Small(1)) as Arc<dyn Id>);
+            assert_eq!(c.read().unwrap().id(), 1);
+        }
+
+        let w: RcuWeak<dyn Id> = RcuWeak::new();
+        assert!(w.upgrade().is_none());
+        assert!(w.read().upgrade().is_none());
+        let a = Arc::new(Small(3)) as Arc<dyn Id>;
+        w.write_arc(&a);
+        assert_eq!(w.upgrade().unwrap().id(), 3);
+        assert!(w.take().upgrade().is_some());
+        assert!(w.upgrade().is_none());
+        let w2: RcuWeak<[u8]> = RcuWeak::default();
+        assert!(w2.upgrade().is_none());
+    }
+
+    #[test]
     fn test_cell_dyn_compare_exchange() {
         use Ordering::SeqCst;
         let c: RcuCell<dyn Id> = RcuCell::from(Arc::new(Small(1)) as Arc<dyn Id>);

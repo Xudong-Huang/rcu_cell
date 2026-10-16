@@ -29,11 +29,11 @@ fn ptr_to_arc<T: ?Sized>(ptr: *const T) -> Option<Arc<T>> {
 /// ```
 ///
 /// Limitations:
-/// - An unsized cell can't be created empty (there is no metadata to start
-///   with), so `none()`, `some()`, `new()` and `Default` need `T: Sized`. It can
-///   be emptied later with `take()` and written again.
+/// - `some()` and `new()` need `T: Sized`, an unsized cell is created from an
+///   existing `Arc`, or empty with `none()` (or `Default`). An empty unsized cell
+///   has no pointer metadata yet, the first value written decides it.
 /// - By default later writes need the same pointer metadata (the slice length or
-///   the `dyn Trait` vtable) as the initial one, otherwise the write panics.
+///   the `dyn Trait` vtable) as the first value, otherwise the write panics.
 ///   It is never undefined behavior, but the vtable address of a type is not
 ///   guaranteed to be unique (e.g. across codegen units), so writing the same
 ///   concrete type may also panic.
@@ -58,7 +58,7 @@ impl<T: ?Sized> Drop for RcuCell<T> {
     }
 }
 
-impl<T> Default for RcuCell<T> {
+impl<T: ?Sized> Default for RcuCell<T> {
     fn default() -> Self {
         RcuCell::none()
     }
@@ -83,14 +83,6 @@ impl<T> From<Option<Arc<T>>> for RcuCell<T> {
 }
 
 impl<T> RcuCell<T> {
-    /// create an empty rcu cell instance
-    #[inline]
-    pub const fn none() -> Self {
-        RcuCell {
-            link: LinkWrapper::new(),
-        }
-    }
-
     /// create rcu cell from a value
     #[inline]
     pub fn some(data: T) -> Self {
@@ -112,6 +104,14 @@ impl<T> RcuCell<T> {
 }
 
 impl<T: ?Sized> RcuCell<T> {
+    /// create an empty rcu cell instance
+    #[inline]
+    pub const fn none() -> Self {
+        RcuCell {
+            link: LinkWrapper::new(),
+        }
+    }
+
 
     /// convert the rcu cell to an Arc value
     #[inline]

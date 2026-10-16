@@ -39,11 +39,11 @@ fn is_dangling<T: ?Sized>(ptr: *const T) -> bool {
 /// ```
 ///
 /// Limitations:
-/// - An unsized cell can't be created empty (there is no metadata to start
-///   with), so `none()`, `some()`, `new()` and `Default` need `T: Sized`. It can
-///   be emptied later with `take()` and written again.
+/// - `some()` and `new()` need `T: Sized`, an unsized cell is created from an
+///   existing `Arc`, or empty with `none()` (or `Default`). An empty unsized cell
+///   has no pointer metadata yet, the first value written decides it.
 /// - By default later writes need the same pointer metadata (the slice length or
-///   the `dyn Trait` vtable) as the initial one, otherwise the write panics.
+///   the `dyn Trait` vtable) as the first value, otherwise the write panics.
 ///   It is never undefined behavior, but the vtable address of a type is not
 ///   guaranteed to be unique (e.g. across codegen units), so writing the same
 ///   concrete type may also panic.
@@ -68,7 +68,7 @@ impl<T: ?Sized> Drop for RcuWeak<T> {
     }
 }
 
-impl<T> Default for RcuWeak<T> {
+impl<T: ?Sized> Default for RcuWeak<T> {
     fn default() -> Self {
         Self::new()
     }
@@ -86,7 +86,7 @@ impl<T: ?Sized> From<Weak<T>> for RcuWeak<T> {
     }
 }
 
-impl<T> RcuWeak<T> {
+impl<T: ?Sized> RcuWeak<T> {
     /// create an dummy rcu weak cell instance, upgrade from it will return None
     #[inline]
     pub const fn new() -> Self {
@@ -94,9 +94,6 @@ impl<T> RcuWeak<T> {
             link: LinkWrapper::new(),
         }
     }
-}
-
-impl<T: ?Sized> RcuWeak<T> {
     /// convert the rcu weak to a `Weak`` value
     #[inline]
     pub fn into_weak(self) -> Weak<T> {

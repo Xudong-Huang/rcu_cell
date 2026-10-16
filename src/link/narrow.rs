@@ -19,57 +19,71 @@ fn ptr_to_addr<T: ?Sized>(ptr: *const T) -> usize {
 /// A wrapper of the pointer to the inner Arc data
 pub(crate) struct LinkWrapper<T: ?Sized> {
     ptr: AtomicUsize,
-    // the pointer metadata (vtable or length) of unsized `T`, it never changes
-    template: *const T,
+    // the pointer metadata (vtable or length) of unsized `T` plus one, 0 means it is
+    // not set yet. It is set once by the first value written and never changes.
+    meta: AtomicUsize,
     phantom: PhantomData<*const T>,
-}
-
-impl<T> LinkWrapper<T> {
-    #[inline]
-    pub(crate) const fn new() -> Self {
-        LinkWrapper {
-            ptr: AtomicUsize::new(0),
-            template: core::ptr::null(),
-            phantom: PhantomData,
-        }
-    }
 }
 
 impl<T: ?Sized> LinkWrapper<T> {
     const IS_THIN: bool = core::mem::size_of::<*const T>() == core::mem::size_of::<usize>();
 
-    // rebuild a pointer from an address, the metadata is taken from the template
+    #[inline]
+    pub(crate) const fn new() -> Self {
+        LinkWrapper {
+            ptr: AtomicUsize::new(0),
+            meta: AtomicUsize::new(0),
+            phantom: PhantomData,
+        }
+    }
+
+    // the metadata word of a fat pointer, the data address is the first word
+    #[inline]
+    fn meta_of(ptr: *const T) -> usize {
+        let words = unsafe { core::mem::transmute_copy::<*const T, [*const (); 2]>(&ptr) };
+        words[1].expose_provenance()
+    }
+
+    // rebuild a pointer from an address, the metadata is taken from the link
     #[inline]
     fn addr_to_ptr(&self, addr: usize) -> *const T {
         let thin: *const () = core::ptr::with_exposed_provenance(addr);
         if Self::IS_THIN {
-            // sized `T` has no metadata, skip reading the template
+            // sized `T` has no metadata
             return unsafe { core::mem::transmute_copy::<*const (), *const T>(&thin) };
         }
-        let mut ptr = self.template;
-        // the data address is the first word of a (fat) pointer
-        unsafe { *(&mut ptr as *mut *const T as *mut *const ()) = thin };
-        ptr
+        // the metadata is set before the first address is published, and an empty
+        // link never dereferences its (possibly unset) metadata
+        let meta = self.meta.load(Ordering::Acquire).wrapping_sub(1);
+        let words = [thin, core::ptr::with_exposed_provenance(meta)];
+        unsafe { core::mem::transmute_copy::<[*const (); 2], *const T>(&words) }
     }
 
-    /// a null pointer that carries the metadata of this link
+    /// a null pointer, for an unsized `T` its metadata is not meaningful
     #[inline]
     pub(crate) fn null(&self) -> *const T {
         self.addr_to_ptr(0)
     }
 
-    /// panic if the pointer metadata (vtable or length) differs from the one this
-    /// link was built with, otherwise a reader would pair the new address with a
-    /// wrong metadata. Vtable addresses are not guaranteed to be unique for a type,
-    /// so this may panic for a valid value, but it never accepts a wrong one.
+    /// the first value fixes the pointer metadata (vtable or length), later ones must
+    /// have the same, otherwise a reader would pair the new address with a wrong
+    /// metadata, so panic. Vtable addresses are not guaranteed to be unique for a
+    /// type, so this may panic for a valid value, but it never accepts a wrong one.
     #[inline]
-    #[allow(ambiguous_wide_pointer_comparisons)]
     pub(crate) fn check_meta(&self, ptr: *const T) {
-        if Self::IS_THIN || self.template.is_null() {
+        if Self::IS_THIN {
             return;
         }
+        let meta = Self::meta_of(ptr).wrapping_add(1);
+        let cur = match self
+            .meta
+            .compare_exchange(0, meta, Ordering::AcqRel, Ordering::Acquire)
+        {
+            Ok(_) => return,
+            Err(cur) => cur,
+        };
         assert!(
-            core::ptr::eq(ptr, self.addr_to_ptr(ptr_to_addr(ptr))),
+            cur == meta,
             "the pointer metadata must be the same as the one the cell was created with"
         );
     }
@@ -79,9 +93,14 @@ impl<T: ?Sized> LinkWrapper<T> {
         let addr = ptr_to_addr(ptr);
         debug_assert!(addr & LOWER_MASK == 0);
         debug_assert!(addr & HIGHER_MASK == 0);
+        let meta = if Self::IS_THIN {
+            0
+        } else {
+            Self::meta_of(ptr).wrapping_add(1)
+        };
         LinkWrapper {
             ptr: AtomicUsize::new(addr << LEADING_BITS),
-            template: ptr,
+            meta: AtomicUsize::new(meta),
             phantom: PhantomData,
         }
     }
