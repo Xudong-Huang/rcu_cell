@@ -11,9 +11,9 @@ mod rcu_weak;
 pub use rcu_cell::RcuCell;
 pub use rcu_weak::RcuWeak;
 
-// we only support 64-bit platform
-const _: () = assert!(usize::MAX.count_ones() == 64);
-const _: () = assert!(core::mem::size_of::<*const ()>() == 8);
+// the pointer and the tag bits are packed into one word, so only 64-bit platforms are supported
+#[cfg(not(target_pointer_width = "64"))]
+compile_error!("rcu_cell only supports 64-bit platforms");
 
 use alloc::sync::Arc;
 
