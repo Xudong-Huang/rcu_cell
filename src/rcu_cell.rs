@@ -1,13 +1,24 @@
 use alloc::sync::Arc;
 use core::mem::ManuallyDrop;
+use core::ptr::NonNull;
 use core::sync::atomic::Ordering;
 
 use crate::link::LinkWrapper;
 use crate::ArcPointer;
 
 #[inline]
-fn ptr_to_arc<T: ?Sized>(ptr: *const T) -> Option<Arc<T>> {
-    (!ptr.is_null()).then(|| unsafe { Arc::from_raw(ptr) })
+fn ptr_to_arc<T: ?Sized>(ptr: Option<NonNull<T>>) -> Option<Arc<T>> {
+    ptr.map(|p| unsafe { Arc::from_raw(p.as_ptr()) })
+}
+
+#[inline]
+fn arc_into_ptr<T: ?Sized>(data: Arc<T>) -> NonNull<T> {
+    unsafe { NonNull::new_unchecked(Arc::into_raw(data) as *mut T) }
+}
+
+#[inline]
+fn same_addr<T: ?Sized>(a: Option<NonNull<T>>, b: Option<NonNull<T>>) -> bool {
+    a.map(|p| p.cast::<()>()) == b.map(|p| p.cast::<()>())
 }
 
 /// RCU cell, it behaves like `RwLock<Option<Arc<T>>>`
@@ -66,7 +77,7 @@ impl<T: ?Sized> Default for RcuCell<T> {
 
 impl<T: ?Sized> From<Arc<T>> for RcuCell<T> {
     fn from(data: Arc<T>) -> Self {
-        let arc_ptr = Arc::into_raw(data);
+        let arc_ptr = Some(arc_into_ptr(data));
         RcuCell {
             link: LinkWrapper::from_ptr(arc_ptr),
         }
@@ -75,7 +86,7 @@ impl<T: ?Sized> From<Arc<T>> for RcuCell<T> {
 
 impl<T> From<Option<Arc<T>>> for RcuCell<T> {
     fn from(data: Option<Arc<T>>) -> Self {
-        let ptr = data.into_raw();
+        let ptr = data.map(arc_into_ptr);
         RcuCell {
             link: LinkWrapper::from_ptr(ptr),
         }
@@ -86,7 +97,7 @@ impl<T> RcuCell<T> {
     /// create rcu cell from a value
     #[inline]
     pub fn some(data: T) -> Self {
-        let ptr = Arc::into_raw(Arc::new(data));
+        let ptr = Some(arc_into_ptr(Arc::new(data)));
         RcuCell {
             link: LinkWrapper::from_ptr(ptr),
         }
@@ -112,7 +123,6 @@ impl<T: ?Sized> RcuCell<T> {
         }
     }
 
-
     /// convert the rcu cell to an Arc value
     #[inline]
     pub fn into_arc(self) -> Option<Arc<T>> {
@@ -136,14 +146,11 @@ impl<T: ?Sized> RcuCell<T> {
     }
 
     #[inline]
-    fn arc_to_ptr(&self, data: Option<Arc<T>>) -> *const T {
-        match data {
-            Some(data) => {
-                self.link.check_meta(Arc::as_ptr(&data));
-                Arc::into_raw(data)
-            }
-            None => self.link.null(),
-        }
+    fn arc_to_ptr(&self, data: Option<Arc<T>>) -> Option<NonNull<T>> {
+        data.map(|data| {
+            self.link.check_meta(Arc::as_ptr(&data));
+            arc_into_ptr(data)
+        })
     }
 
     /// take the value from the rcu cell, leave the rcu cell empty
@@ -173,14 +180,11 @@ impl<T: ?Sized> RcuCell<T> {
         // the cell still owns this Arc until the update is done, so a panic
         // in `f` or in the metadata check must not drop it
         let old_value = ManuallyDrop::new(ptr_to_arc(ptr));
-        let new_ptr = match f((*old_value).clone()) {
-            Some(data) => {
-                let data = data.into();
-                self.link.check_meta(Arc::as_ptr(&data));
-                Arc::into_raw(data)
-            }
-            None => self.link.null(),
-        };
+        let new_ptr = f((*old_value).clone()).map(|data| {
+            let data = data.into();
+            self.link.check_meta(Arc::as_ptr(&data));
+            arc_into_ptr(data)
+        });
         self.link.unlock_update(new_ptr);
         ManuallyDrop::into_inner(old_value)
     }
@@ -229,12 +233,15 @@ impl<T: ?Sized> RcuCell<T> {
     where
         T: 'a,
     {
-        let new_ptr = match new {
-            Some(data) => {
-                let ptr = Arc::as_ptr(data);
-                self.link.check_meta(ptr);
-                ptr
-            }
+        let new_ptr = new.map(|data| {
+            let ptr = Arc::as_ptr(data);
+            self.link.check_meta(ptr);
+            unsafe { NonNull::new_unchecked(ptr as *mut T) }
+        });
+        let current = NonNull::new(current as *mut T);
+
+        let to_raw = |ptr: Option<NonNull<T>>| match ptr {
+            Some(p) => p.as_ptr() as *const T,
             None => self.link.null(),
         };
 
@@ -249,6 +256,8 @@ impl<T: ?Sized> RcuCell<T> {
                     let _ = Arc::into_raw(Arc::clone(v));
                 }
             })
+            .map(to_raw)
+            .map_err(to_raw)
     }
 
     /// read out the inner Arc value
@@ -265,12 +274,15 @@ impl<T: ?Sized> RcuCell<T> {
     /// read inner ptr and check if it is the same as the given Arc
     #[inline]
     pub fn arc_eq(&self, data: &Arc<T>) -> bool {
-        core::ptr::addr_eq(self.link.get_ref(), Arc::as_ptr(data))
+        same_addr(
+            self.link.get_ref(),
+            NonNull::new(Arc::as_ptr(data) as *mut T),
+        )
     }
 
     /// check if two RcuCell instances point to the same inner Arc
     #[inline]
     pub fn ptr_eq(this: &Self, other: &Self) -> bool {
-        core::ptr::addr_eq(this.link.get_ref(), other.link.get_ref())
+        same_addr(this.link.get_ref(), other.link.get_ref())
     }
 }

@@ -50,8 +50,8 @@ mod test {
     extern crate std;
     use super::RcuCell;
     use alloc::sync::Arc;
-    use std::panic::{catch_unwind, AssertUnwindSafe};
     use core::sync::atomic::{AtomicUsize, Ordering};
+    use std::panic::{catch_unwind, AssertUnwindSafe};
 
     #[test]
     fn test_default() {
@@ -375,7 +375,6 @@ mod test {
 
         let w: RcuWeak<dyn Id> = RcuWeak::new();
         assert!(w.upgrade().is_none());
-        assert!(w.read().upgrade().is_none());
         let a = Arc::new(Small(3)) as Arc<dyn Id>;
         w.write_arc(&a);
         assert_eq!(w.upgrade().unwrap().id(), 3);

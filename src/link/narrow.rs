@@ -1,5 +1,6 @@
 use core::fmt;
 use core::marker::PhantomData;
+use core::ptr::NonNull;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 const LEADING_BITS: usize = 8;
@@ -44,25 +45,51 @@ impl<T: ?Sized> LinkWrapper<T> {
         words[1].expose_provenance()
     }
 
-    // rebuild a pointer from an address, the metadata is taken from the link
     #[inline]
-    fn addr_to_ptr(&self, addr: usize) -> *const T {
-        let thin: *const () = core::ptr::with_exposed_provenance(addr);
-        if Self::IS_THIN {
-            // sized `T` has no metadata
-            return unsafe { core::mem::transmute_copy::<*const (), *const T>(&thin) };
-        }
-        // the metadata is set before the first address is published, and an empty
-        // link never dereferences its (possibly unset) metadata
-        let meta = self.meta.load(Ordering::Acquire).wrapping_sub(1);
-        let words = [thin, core::ptr::with_exposed_provenance(meta)];
-        unsafe { core::mem::transmute_copy::<[*const (); 2], *const T>(&words) }
+    fn opt_addr(ptr: Option<NonNull<T>>) -> usize {
+        ptr.map_or(0, |p| ptr_to_addr(p.as_ptr()))
     }
 
-    /// a null pointer, for an unsized `T` its metadata is not meaningful
+    // rebuild a raw pointer from an address with the metadata of the link,
+    // None if the metadata is needed but not set yet, so no invalid pointer is built
+    #[inline]
+    fn raw_at(&self, addr: usize) -> Option<*const T> {
+        let thin: *const () = core::ptr::with_exposed_provenance(addr);
+        if Self::IS_THIN {
+            return Some(unsafe { core::mem::transmute_copy::<*const (), *const T>(&thin) });
+        }
+        let meta = self.meta.load(Ordering::Acquire).checked_sub(1)?;
+        let words = [thin, core::ptr::with_exposed_provenance(meta)];
+        Some(unsafe { core::mem::transmute_copy::<[*const (); 2], *const T>(&words) })
+    }
+
+    #[inline]
+    fn ptr_at(&self, addr: usize) -> Option<NonNull<T>> {
+        NonNull::new(self.raw_at(addr)? as *mut T)
+    }
+
+    /// a null pointer, panics if `T` is unsized and no value was ever written
     #[inline]
     pub(crate) fn null(&self) -> *const T {
-        self.addr_to_ptr(0)
+        self.raw_at(0)
+            .expect("a null pointer of an unsized type needs the metadata of a written value")
+    }
+
+    // the metadata is set before the first address is published
+    #[inline]
+    fn addr_to_ptr(&self, addr: usize) -> Option<NonNull<T>> {
+        if addr == 0 {
+            return None;
+        }
+        let ptr = self.ptr_at(addr);
+        debug_assert!(ptr.is_some());
+        ptr
+    }
+
+    /// the dangling pointer of a `Weak`, None if the metadata is not known yet
+    #[inline]
+    pub(crate) fn dangling(&self) -> Option<NonNull<T>> {
+        self.ptr_at(usize::MAX)
     }
 
     /// the first value fixes the pointer metadata (vtable or length), later ones must
@@ -89,14 +116,13 @@ impl<T: ?Sized> LinkWrapper<T> {
     }
 
     #[inline]
-    pub(crate) fn from_ptr(ptr: *const T) -> Self {
-        let addr = ptr_to_addr(ptr);
+    pub(crate) fn from_ptr(ptr: Option<NonNull<T>>) -> Self {
+        let addr = Self::opt_addr(ptr);
         debug_assert!(addr & LOWER_MASK == 0);
         debug_assert!(addr & HIGHER_MASK == 0);
-        let meta = if Self::IS_THIN {
-            0
-        } else {
-            Self::meta_of(ptr).wrapping_add(1)
+        let meta = match ptr {
+            Some(p) if !Self::IS_THIN => Self::meta_of(p.as_ptr()).wrapping_add(1),
+            _ => 0,
         };
         LinkWrapper {
             ptr: AtomicUsize::new(addr << LEADING_BITS),
@@ -107,15 +133,15 @@ impl<T: ?Sized> LinkWrapper<T> {
 
     pub(crate) unsafe fn compare_exchange(
         &self,
-        current: *const T,
-        new: *const T,
+        current: Option<NonNull<T>>,
+        new: Option<NonNull<T>>,
         success: Ordering,
         failure: Ordering,
-    ) -> Result<*const T, *const T> {
-        let new_addr = ptr_to_addr(new);
+    ) -> Result<Option<NonNull<T>>, Option<NonNull<T>>> {
+        let new_addr = Self::opt_addr(new);
         let new = new_addr << LEADING_BITS;
 
-        let old_addr = ptr_to_addr(current);
+        let old_addr = Self::opt_addr(current);
         let old = old_addr << LEADING_BITS;
 
         let backoff = crossbeam_utils::Backoff::new();
@@ -136,9 +162,9 @@ impl<T: ?Sized> LinkWrapper<T> {
         }
     }
 
-    pub(crate) fn update(&self, ptr: *const T) -> *const T {
+    pub(crate) fn update(&self, ptr: Option<NonNull<T>>) -> Option<NonNull<T>> {
         use Ordering::*;
-        let addr = ptr_to_addr(ptr);
+        let addr = Self::opt_addr(ptr);
         debug_assert!(addr & LOWER_MASK == 0);
         debug_assert!(addr & HIGHER_MASK == 0);
         let new = addr << LEADING_BITS;
@@ -157,9 +183,9 @@ impl<T: ?Sized> LinkWrapper<T> {
     }
 
     // this is only used after lock_read
-    pub(crate) fn unlock_update(&self, ptr: *const T) -> *const T {
+    pub(crate) fn unlock_update(&self, ptr: Option<NonNull<T>>) -> Option<NonNull<T>> {
         use Ordering::*;
-        let addr = ptr_to_addr(ptr);
+        let addr = Self::opt_addr(ptr);
         debug_assert!(addr & LOWER_MASK == 0);
         debug_assert!(addr & HIGHER_MASK == 0);
         let new = addr << LEADING_BITS;
@@ -183,7 +209,7 @@ impl<T: ?Sized> LinkWrapper<T> {
     }
 
     #[inline]
-    pub(crate) fn inc_ref(&self) -> *const T {
+    pub(crate) fn inc_ref(&self) -> Option<NonNull<T>> {
         let addr = self.ptr.fetch_add(1, Ordering::Acquire);
         let refs = addr & REFCOUNT_MASK;
         assert!(refs < REFCOUNT_MASK, "Too many references");
@@ -192,7 +218,7 @@ impl<T: ?Sized> LinkWrapper<T> {
     }
 
     #[inline]
-    pub(crate) fn get_ref(&self) -> *const T {
+    pub(crate) fn get_ref(&self) -> Option<NonNull<T>> {
         let addr = self.ptr.load(Ordering::Acquire);
         let addr = (addr & !REFCOUNT_MASK) >> LEADING_BITS;
         self.addr_to_ptr(addr)
@@ -207,7 +233,7 @@ impl<T: ?Sized> LinkWrapper<T> {
     // to prevet other writer to update the inner Arc
     // should be paired used with unlock_update
     #[inline]
-    pub(crate) fn lock_read(&self) -> *const T {
+    pub(crate) fn lock_read(&self) -> Option<NonNull<T>> {
         use Ordering::*;
 
         let addr = self.ptr.load(Relaxed);
