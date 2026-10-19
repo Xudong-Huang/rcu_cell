@@ -50,11 +50,15 @@ fn is_dangling<T: ?Sized>(ptr: *const T) -> bool {
 ///   guaranteed to be unique (e.g. across codegen units), so writing the same
 ///   concrete type may also panic.
 /// - With a nightly compiler, on targets that have 128-bit atomics
-///   (`target_has_atomic = "128"`, e.g. aarch64 and s390x, but not x86_64) the
-///   address and the metadata are stored in one `core::sync::atomic::AtomicU128`,
-///   so values with different concrete types or lengths can be swapped freely and
-///   the metadata check doesn't apply. `build.rs` detects this automatically.
-/// - Sized cells always use a single `AtomicUsize`, they pay nothing for this.
+///   (`target_has_atomic = "128"`, e.g. aarch64 and s390x) the address and the metadata
+///   are stored in one `core::sync::atomic::AtomicU128`, so values with different
+///   concrete types or lengths can be swapped freely and the metadata check doesn't
+///   apply. `build.rs` detects this automatically.
+/// - On x86_64 the same applies when `cmpxchg16b` is enabled at compile time or
+///   when `build.rs` finds that the build machine (also the target) supports it.
+///   The binary then needs a cpu with `cmpxchg16b`.
+/// - Sized cells use a single `AtomicUsize` as the atomic, but in this wide mode the
+///   cell is still 16 bytes, the size of the 128-bit atomic.
 #[derive(Debug)]
 pub struct RcuWeak<T: ?Sized> {
     link: LinkWrapper<T>,
