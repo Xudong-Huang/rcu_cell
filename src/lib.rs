@@ -49,6 +49,7 @@ impl<T> ArcPointer<T> for Option<Arc<T>> {
 mod test {
     extern crate std;
     use super::RcuCell;
+    use super::RcuWeak;
     use alloc::sync::Arc;
     use core::sync::atomic::{AtomicUsize, Ordering};
     use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -243,7 +244,6 @@ mod test {
     #[cfg(not(miri))]
     #[test]
     fn test_unsized_weak() {
-        use super::RcuWeak;
         use alloc::sync::Weak;
         trait B: Send + Sync {
             fn id(&self) -> u32;
@@ -295,7 +295,8 @@ mod test {
         }
     }
 
-    use crate::link::WIDE_ATOMIC;
+    /// whether unsized values with different pointer metadata can be swapped in a cell
+    const WIDE_ATOMIC: bool = cfg!(rcu_cell_wide);
 
     #[test]
     fn test_cell_slice_len_changed() {
@@ -349,7 +350,6 @@ mod test {
 
     #[test]
     fn test_unsized_none() {
-        use super::RcuWeak;
         let c: RcuCell<dyn Id> = RcuCell::none();
         assert!(c.is_none());
         assert!(c.read().is_none());
@@ -411,7 +411,6 @@ mod test {
 
     #[test]
     fn test_weak_dyn_swap_implementors() {
-        use super::RcuWeak;
         let a = Arc::new(Small(1)) as Arc<dyn Id>;
         let b = Arc::new(Big(2, 3)) as Arc<dyn Id>;
         let w = RcuWeak::from(Arc::downgrade(&a));
@@ -469,13 +468,17 @@ mod test {
     #[test]
     fn test_sized_cell_size() {
         // a sized cell is a single word, only an unsized one carries the metadata
-        #[cfg(not(any(
-            rcu_cell_atomic_u128,
-            all(target_arch = "x86_64", target_feature = "cmpxchg16b", not(miri))
-        )))]
+        #[cfg(not(rcu_cell_wide))]
         {
             assert_eq!(core::mem::size_of::<RcuCell<u32>>(), 8);
-            assert_eq!(core::mem::size_of::<super::RcuWeak<u32>>(), 8);
+            assert_eq!(core::mem::size_of::<RcuWeak<u32>>(), 8);
+            assert_eq!(core::mem::size_of::<RcuCell<dyn core::any::Any>>(), 16);
+        }
+        // the link is a union with the 128-bit atomic, so every cell has its size
+        #[cfg(rcu_cell_wide)]
+        {
+            assert_eq!(core::mem::size_of::<RcuCell<u32>>(), 16);
+            assert_eq!(core::mem::size_of::<RcuWeak<u32>>(), 16);
             assert_eq!(core::mem::size_of::<RcuCell<dyn core::any::Any>>(), 16);
         }
     }

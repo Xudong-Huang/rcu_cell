@@ -13,11 +13,43 @@ pub static A: core::sync::atomic::AtomicU128 = core::sync::atomic::AtomicU128::n
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rustc-check-cfg=cfg(rcu_cell_atomic_u128)");
 
+    println!("cargo:rustc-check-cfg=cfg(rcu_cell_wide)");
+    println!("cargo:rustc-check-cfg=cfg(rcu_cell_atomic_u128)");
+    println!("cargo:rustc-check-cfg=cfg(rcu_cell_cx16)");
+
+    // `rcu_cell_wide`: a lock free 128-bit atomic is available, either the core one
+    // (`rcu_cell_atomic_u128`) or our own `cmpxchg16b` one (`rcu_cell_cx16`)
     if has_atomic_u128() {
         println!("cargo:rustc-cfg=rcu_cell_atomic_u128");
+        println!("cargo:rustc-cfg=rcu_cell_wide");
+    } else if has_cx16() {
+        println!("cargo:rustc-cfg=rcu_cell_cx16");
+        println!("cargo:rustc-cfg=rcu_cell_wide");
     }
+}
+
+// our own atomic is not usable under Miri
+fn has_cx16() -> bool {
+    env::var_os("CARGO_CFG_MIRI").is_none()
+        && env::var("CARGO_CFG_TARGET_ARCH").is_ok_and(|a| a == "x86_64")
+        && (env::var("CARGO_CFG_TARGET_FEATURE")
+            .is_ok_and(|f| f.split(',').any(|f| f == "cmpxchg16b"))
+            || has_host_cx16())
+}
+
+// `cmpxchg16b` is not part of the baseline x86_64 target, so enable it only when the
+// machine doing the build supports it and it is also the target. The binary then needs
+// a cpu with `cmpxchg16b` (every x86_64 cpu since ~2006 has it).
+#[cfg(target_arch = "x86_64")]
+fn has_host_cx16() -> bool {
+    env::var_os("HOST") == env::var_os("TARGET")
+        && std::arch::is_x86_feature_detected!("cmpxchg16b")
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn has_host_cx16() -> bool {
+    false
 }
 
 fn has_atomic_u128() -> bool {

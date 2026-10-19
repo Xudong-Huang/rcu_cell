@@ -8,52 +8,18 @@
 //   build.rs finds that the compiler and the target support it (nightly).
 // - our own `cmpxchg16b` based one on x86_64, only when the target feature is
 //   statically enabled (e.g. `-C target-cpu=native` or `-C target-feature=+cmpxchg16b`)
+//   or when build.rs finds that the build machine, which is also the target, supports it
 //   and not under Miri. This works on stable.
 
-#[cfg(all(
-    not(rcu_cell_atomic_u128),
-    target_arch = "x86_64",
-    target_feature = "cmpxchg16b",
-    not(miri)
-))]
+#[cfg(rcu_cell_cx16)]
 mod atomic128;
 
-#[cfg(any(
-    rcu_cell_atomic_u128,
-    all(target_arch = "x86_64", target_feature = "cmpxchg16b", not(miri))
-))]
+#[cfg(rcu_cell_wide)]
 mod wide;
-#[cfg(any(
-    rcu_cell_atomic_u128,
-    all(target_arch = "x86_64", target_feature = "cmpxchg16b", not(miri))
-))]
+#[cfg(rcu_cell_wide)]
 pub(crate) use wide::LinkWrapper;
-/// whether unsized values with different pointer metadata can be swapped in a cell
-#[cfg(all(
-    test,
-    any(
-        rcu_cell_atomic_u128,
-        all(target_arch = "x86_64", target_feature = "cmpxchg16b", not(miri))
-    )
-))]
-pub(crate) const WIDE_ATOMIC: bool = true;
 
-#[cfg(not(any(
-    rcu_cell_atomic_u128,
-    all(target_arch = "x86_64", target_feature = "cmpxchg16b", not(miri))
-)))]
+#[cfg(not(rcu_cell_wide))]
 mod narrow;
-#[cfg(not(any(
-    rcu_cell_atomic_u128,
-    all(target_arch = "x86_64", target_feature = "cmpxchg16b", not(miri))
-)))]
+#[cfg(not(rcu_cell_wide))]
 pub(crate) use narrow::LinkWrapper;
-/// whether unsized values with different pointer metadata can be swapped in a cell
-#[cfg(all(
-    test,
-    not(any(
-        rcu_cell_atomic_u128,
-        all(target_arch = "x86_64", target_feature = "cmpxchg16b", not(miri))
-    ))
-))]
-pub(crate) const WIDE_ATOMIC: bool = false;

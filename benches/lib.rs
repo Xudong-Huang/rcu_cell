@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 #[bench]
 fn rcu_read(b: &mut Bencher) {
-    let rcu_cell = Arc::new(RcuCell::new(10));
+    let rcu_cell = RcuCell::new(10);
     b.iter(|| {
         let v = rcu_cell.read().unwrap();
         test::black_box(&*v);
@@ -19,7 +19,7 @@ fn rcu_read(b: &mut Bencher) {
 
 #[bench]
 fn rcu_write(b: &mut Bencher) {
-    let rcu_cell = Arc::new(RcuCell::new(0));
+    let rcu_cell = RcuCell::new(0);
     let mut i = 0;
     b.iter(|| {
         i += 1;
@@ -42,9 +42,9 @@ fn read_update_1(b: &mut Bencher) {
 
     b.iter(|| {
         REF.store(0, Ordering::Relaxed);
-        let rcu_cell = Arc::new(RcuCell::new(Foo(42)));
+        let rcu_cell = RcuCell::new(Foo(42));
         std::thread::scope(|s| {
-            let rcu = rcu_cell.clone();
+            let rcu = &rcu_cell;
             s.spawn(move || {
                 for i in 0..1000 {
                     rcu.update(|_| Some(Foo(i)));
@@ -52,7 +52,7 @@ fn read_update_1(b: &mut Bencher) {
             });
             let readers = 8;
             for _ in 0..readers {
-                let rcu = rcu_cell.clone();
+                let rcu = &rcu_cell;
                 s.spawn(move || {
                     for _i in 0..1000 {
                         let v = rcu.read().unwrap();
@@ -81,16 +81,16 @@ fn read_update_2(b: &mut Bencher) {
 
     b.iter(|| {
         REF.store(0, Ordering::Relaxed);
-        let rcu_cell = Arc::new(RcuCell::new(Foo(42)));
+        let rcu_cell = RcuCell::new(Foo(42));
         std::thread::scope(|s| {
-            let rcu = rcu_cell.clone();
+            let rcu = &rcu_cell;
             s.spawn(move || {
                 for i in 0..1000 {
                     rcu.update(|_| Some(Foo(i)));
                 }
             });
 
-            let rcu = rcu_cell.clone();
+            let rcu = &rcu_cell;
             s.spawn(move || {
                 for i in 0..1000 {
                     rcu.update(|_| Some(Foo(i)));
@@ -99,7 +99,7 @@ fn read_update_2(b: &mut Bencher) {
 
             let readers = 8;
             for _ in 0..readers {
-                let rcu = rcu_cell.clone();
+                let rcu = &rcu_cell;
                 s.spawn(move || {
                     for _i in 0..1000 {
                         let v = rcu.read().unwrap();
@@ -128,9 +128,9 @@ fn read_write_1(b: &mut Bencher) {
 
     b.iter(|| {
         REF.store(0, Ordering::Relaxed);
-        let rcu_cell = Arc::new(RcuCell::new(Foo(42)));
+        let rcu_cell = RcuCell::new(Foo(42));
         std::thread::scope(|s| {
-            let rcu = rcu_cell.clone();
+            let rcu = &rcu_cell;
             s.spawn(move || {
                 for i in 0..1000 {
                     rcu.write(Foo(i));
@@ -138,7 +138,7 @@ fn read_write_1(b: &mut Bencher) {
             });
             let readers = 8;
             for _ in 0..readers {
-                let rcu = rcu_cell.clone();
+                let rcu = &rcu_cell;
                 s.spawn(move || {
                     for _i in 0..1000 {
                         let v = rcu.read().unwrap();
@@ -167,16 +167,16 @@ fn read_write_2(b: &mut Bencher) {
 
     b.iter(|| {
         REF.store(0, Ordering::Relaxed);
-        let rcu_cell = Arc::new(RcuCell::new(Foo(42)));
+        let rcu_cell = RcuCell::new(Foo(42));
         std::thread::scope(|s| {
-            let rcu = rcu_cell.clone();
+            let rcu = &rcu_cell;
             s.spawn(move || {
                 for i in 0..1000 {
                     rcu.write(Foo(i));
                 }
             });
 
-            let rcu = rcu_cell.clone();
+            let rcu = &rcu_cell;
             s.spawn(move || {
                 for i in 0..1000 {
                     rcu.write(Foo(i));
@@ -185,7 +185,7 @@ fn read_write_2(b: &mut Bencher) {
 
             let readers = 8;
             for _ in 0..readers {
-                let rcu = rcu_cell.clone();
+                let rcu = &rcu_cell;
                 s.spawn(move || {
                     for _i in 0..1000 {
                         let v = rcu.read().unwrap();
@@ -215,9 +215,9 @@ fn arc_swap(b: &mut Bencher) {
 
     b.iter(|| {
         REF.store(0, Ordering::Relaxed);
-        let arc_swap = Arc::new(ArcSwap::new(Arc::new(Foo(42))));
+        let arc_swap = ArcSwap::new(Arc::new(Foo(42)));
         std::thread::scope(|s| {
-            let rcu = arc_swap.clone();
+            let rcu = &arc_swap;
             s.spawn(move || {
                 for i in 0..1000 {
                     rcu.store(Arc::new(Foo(i)));
@@ -225,7 +225,7 @@ fn arc_swap(b: &mut Bencher) {
             });
             let readers = 8;
             for _ in 0..readers {
-                let rcu = arc_swap.clone();
+                let rcu = &arc_swap;
                 s.spawn(move || {
                     for _i in 0..1000 {
                         let v = rcu.load();
@@ -255,9 +255,9 @@ fn rwlock_arc(b: &mut Bencher) {
 
     b.iter(|| {
         REF.store(0, Ordering::Relaxed);
-        let arc_swap = Arc::new(RwLock::new(Arc::new(Foo(42))));
+        let arc_swap = RwLock::new(Arc::new(Foo(42)));
         std::thread::scope(|s| {
-            let rcu = arc_swap.clone();
+            let rcu = &arc_swap;
             s.spawn(move || {
                 for i in 0..1000 {
                     *rcu.write() = Arc::new(Foo(i));
@@ -265,7 +265,7 @@ fn rwlock_arc(b: &mut Bencher) {
             });
             let readers = 8;
             for _ in 0..readers {
-                let rcu = arc_swap.clone();
+                let rcu = &arc_swap;
                 s.spawn(move || {
                     for _i in 0..1000 {
                         let _v: Arc<_> = rcu.read().clone();
