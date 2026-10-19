@@ -278,3 +278,71 @@ fn rwlock_arc(b: &mut Bencher) {
         assert_eq!(REF.load(Ordering::Relaxed), 1001);
     });
 }
+
+trait Val: Send + Sync {
+    fn get(&self) -> usize;
+}
+
+struct Num(usize);
+
+impl Val for Num {
+    fn get(&self) -> usize {
+        self.0
+    }
+}
+
+// all values are coerced in this one function so they share a single vtable address,
+// which is required when the 128-bit atomic is not available
+#[inline(never)]
+fn new_val(v: usize) -> Arc<dyn Val> {
+    Arc::new(Num(v))
+}
+
+#[bench]
+fn rcu_dyn_read(b: &mut Bencher) {
+    let a = new_val(10);
+    let rcu_cell: RcuCell<dyn Val> = RcuCell::from(a);
+    b.iter(|| {
+        let v = rcu_cell.read().unwrap();
+        test::black_box(v.get());
+    });
+}
+
+#[bench]
+fn rcu_dyn_write(b: &mut Bencher) {
+    let a = new_val(0);
+    let rcu_cell: RcuCell<dyn Val> = RcuCell::from(a);
+    let mut i = 0;
+    b.iter(|| {
+        i += 1;
+        let v = rcu_cell.write(new_val(i)).unwrap();
+        assert_eq!(v.get(), i - 1);
+    });
+}
+
+#[bench]
+fn read_write_dyn(b: &mut Bencher) {
+    b.iter(|| {
+        let a = new_val(42);
+        let rcu_cell: RcuCell<dyn Val> = RcuCell::from(a);
+        std::thread::scope(|s| {
+            let rcu = &rcu_cell;
+            s.spawn(move || {
+                for i in 0..1000 {
+                    rcu.write(new_val(i));
+                }
+            });
+            let readers = 8;
+            for _ in 0..readers {
+                let rcu = &rcu_cell;
+                s.spawn(move || {
+                    for _i in 0..1000 {
+                        let v = rcu.read().unwrap();
+                        test::black_box(v.get());
+                    }
+                });
+            }
+        });
+        assert_eq!(rcu_cell.read().unwrap().get(), 999);
+    });
+}
