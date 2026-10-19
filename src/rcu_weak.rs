@@ -1,7 +1,6 @@
 use alloc::sync::{Arc, Weak};
 use core::mem::ManuallyDrop;
 use core::ptr::NonNull;
-use core::sync::atomic::Ordering;
 
 use crate::link::LinkWrapper;
 
@@ -152,9 +151,7 @@ impl<T: ?Sized> RcuWeak<T> {
         let v = ManuallyDrop::new(ptr_to_weak(ptr));
         let cloned = v.as_ref().cloned();
         self.link.dec_ref();
-        let cloned = cloned.unwrap_or_else(|| self.weak_from_link(None));
-        core::sync::atomic::fence(Ordering::Acquire);
-        cloned
+        cloned.unwrap_or_else(|| self.weak_from_link(None))
     }
 
     /// upgrade the innner weak value to an Arc value
@@ -164,7 +161,6 @@ impl<T: ?Sized> RcuWeak<T> {
         let v = ManuallyDrop::new(ptr_to_weak(ptr));
         let cloned = v.as_ref().and_then(Weak::upgrade);
         self.link.dec_ref();
-        core::sync::atomic::fence(Ordering::Acquire);
         cloned
     }
 

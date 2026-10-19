@@ -5,7 +5,7 @@
 
 use core::arch::asm;
 use core::cell::UnsafeCell;
-use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 #[repr(C, align(16))]
 pub(super) struct AtomicU128 {
@@ -58,6 +58,22 @@ impl AtomicU128 {
         self.cas(0, 0).0
     }
 
+    /// two plain loads, so it may be torn (the halves from different moments). It is
+    /// only fit as the initial guess of a compare-exchange loop, which validates the
+    /// whole value, and avoids the locked instruction of `load`.
+    #[inline]
+    pub(super) fn load_hint(&self) -> u128 {
+        let p = self.v.get().cast::<u64>();
+        // the cell is `align(16)` and little endian, so these are its two aligned words
+        let (lo, hi) = unsafe {
+            (
+                AtomicU64::from_ptr(p).load(Ordering::Relaxed),
+                AtomicU64::from_ptr(p.add(1)).load(Ordering::Relaxed),
+            )
+        };
+        (lo as u128) | ((hi as u128) << 64)
+    }
+
     #[inline]
     pub(super) fn compare_exchange(
         &self,
@@ -85,7 +101,7 @@ impl AtomicU128 {
 
     #[inline]
     pub(super) fn fetch_add(&self, val: u128, _order: Ordering) -> u128 {
-        let mut cur = self.load(Ordering::Relaxed);
+        let mut cur = self.load_hint();
         loop {
             match self.cas(cur, cur.wrapping_add(val)) {
                 (v, true) => return v,
@@ -96,7 +112,7 @@ impl AtomicU128 {
 
     #[inline]
     pub(super) fn fetch_sub(&self, val: u128, _order: Ordering) -> u128 {
-        let mut cur = self.load(Ordering::Relaxed);
+        let mut cur = self.load_hint();
         loop {
             match self.cas(cur, cur.wrapping_sub(val)) {
                 (v, true) => return v,

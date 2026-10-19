@@ -288,7 +288,6 @@ impl<T: ?Sized> RcuCell<T> {
         let v = ManuallyDrop::new(ptr_to_arc(ptr));
         let cloned = v.as_ref().cloned();
         self.link.dec_ref();
-        core::sync::atomic::fence(Ordering::Acquire);
         cloned
     }
 

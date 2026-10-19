@@ -133,6 +133,21 @@ impl<T: ?Sized> LinkWrapper<T> {
         }
     }
 
+    // the initial guess of a CAS loop, it may be torn since the CAS validates it
+    #[inline]
+    fn load_hint(&self) -> Pair {
+        #[cfg(rcu_cell_atomic_u128)]
+        return self.load(Ordering::Relaxed);
+        #[cfg(not(rcu_cell_atomic_u128))]
+        unsafe {
+            if Self::IS_THIN {
+                (self.storage.thin.load(Ordering::Relaxed), 0)
+            } else {
+                u128_to_pair(self.storage.wide.load_hint())
+            }
+        }
+    }
+
     #[inline]
     fn cas_weak(&self, old: Pair, new: Pair, s: Ordering, f: Ordering) -> Result<Pair, Pair> {
         unsafe {
@@ -276,7 +291,7 @@ impl<T: ?Sized> LinkWrapper<T> {
         debug_assert!(addr & LOWER_MASK == 0);
         debug_assert!(addr & HIGHER_MASK == 0);
         let new_word = addr << LEADING_BITS;
-        let mut cur = self.load(Relaxed);
+        let mut cur = self.load_hint();
 
         let backoff = crossbeam_utils::Backoff::new();
         // wait all reader release
@@ -304,7 +319,7 @@ impl<T: ?Sized> LinkWrapper<T> {
         debug_assert!(addr & LOWER_MASK == 0);
         debug_assert!(addr & HIGHER_MASK == 0);
         let new_word = addr << LEADING_BITS;
-        let mut cur = self.load(Relaxed);
+        let mut cur = self.load_hint();
 
         let backoff = crossbeam_utils::Backoff::new();
         // wait all reader release
@@ -354,7 +369,7 @@ impl<T: ?Sized> LinkWrapper<T> {
     pub(crate) fn lock_read(&self) -> Option<NonNull<T>> {
         use Ordering::*;
 
-        let mut cur = self.load(Relaxed);
+        let mut cur = self.load_hint();
 
         let backoff = crossbeam_utils::Backoff::new();
         loop {
