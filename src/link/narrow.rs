@@ -255,19 +255,25 @@ impl<T: ?Sized> LinkWrapper<T> {
     pub(crate) fn lock_read(&self) -> Option<NonNull<T>> {
         use Ordering::*;
 
-        let addr = self.ptr().load(Relaxed);
-        let mut old = addr & !UPDTATE_MASK; // clear the update flag
-        let mut new = addr | UPDTATE_MASK; // set the update flag
-
-        let refs = old & UPDATE_REF_MASK;
-        assert!(refs < UPDATE_REF_MASK, "Too many references");
+        let mut cur = self.ptr().load(Relaxed);
 
         let backoff = crossbeam_utils::Backoff::new();
-        while let Err(addr) = self.ptr().compare_exchange_weak(old, new, Release, Relaxed) {
-            old = addr & !UPDTATE_MASK;
-            new = addr | UPDTATE_MASK;
-            backoff.snooze();
-        }
+        let old = loop {
+            let old = cur & !UPDTATE_MASK; // clear the update flag
+            let new = cur | UPDTATE_MASK; // set the update flag
+
+            // checked on every retry, the count may have changed
+            let refs = old & UPDATE_REF_MASK;
+            assert!(refs < UPDATE_REF_MASK, "Too many references");
+
+            match self.ptr().compare_exchange_weak(old, new, Release, Relaxed) {
+                Ok(_) => break old,
+                Err(c) => {
+                    cur = c;
+                    backoff.snooze();
+                }
+            }
+        };
 
         core::sync::atomic::fence(Ordering::Acquire);
 
