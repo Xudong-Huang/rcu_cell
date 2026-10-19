@@ -10,14 +10,7 @@ use core::sync::atomic::AtomicU128;
 #[cfg(not(rcu_cell_atomic_u128))]
 use super::atomic128::AtomicU128;
 
-const LEADING_BITS: usize = 8;
-const ALIGN_BITS: usize = 3;
-
-const LOWER_MASK: usize = (1 << ALIGN_BITS) - 1;
-const HIGHER_MASK: usize = !((1 << (usize::MAX.leading_ones() as usize - LEADING_BITS)) - 1);
-const REFCOUNT_MASK: usize = (1 << (LEADING_BITS + ALIGN_BITS)) - 1;
-const UPDTATE_MASK: usize = 1 << (LEADING_BITS + ALIGN_BITS - 1);
-const UPDATE_REF_MASK: usize = REFCOUNT_MASK & !UPDTATE_MASK;
+use super::{HIGHER_MASK, LEADING_BITS, LOWER_MASK, REFCOUNT_MASK, UPDATE_MASK, UPDATE_REF_MASK};
 
 /// the content of the link: the tagged address word and the pointer metadata word
 /// (the vtable or the length of an unsized `T` plus one, 0 means it is not set
@@ -30,7 +23,7 @@ fn ptr_to_addr<T: ?Sized>(ptr: *const T) -> usize {
 }
 
 #[inline]
-fn pair_to_u128((lo, hi): Pair) -> u128 {
+const fn pair_to_u128((lo, hi): Pair) -> u128 {
     (lo as u128) | ((hi as u128) << 64)
 }
 
@@ -39,10 +32,105 @@ fn u128_to_pair(v: u128) -> Pair {
     (v as usize, (v >> 64) as usize)
 }
 
-// sized `T` only touches the `thin` field and unsized `T` only touches the `wide` one
+// sized `T` only touches the `thin` field and unsized `T` only touches the `wide` one.
+// Every method takes `thin`, which must always be the `IS_THIN` of the owning link, so
+// the field that is accessed is the one that was initialized.
 union Storage {
     thin: ManuallyDrop<AtomicUsize>,
     wide: ManuallyDrop<AtomicU128>,
+}
+
+impl Storage {
+    #[inline]
+    const fn new(thin: bool, pair: Pair) -> Self {
+        if thin {
+            Storage {
+                thin: ManuallyDrop::new(AtomicUsize::new(pair.0)),
+            }
+        } else {
+            Storage {
+                wide: ManuallyDrop::new(AtomicU128::new(pair_to_u128(pair))),
+            }
+        }
+    }
+
+    #[inline]
+    fn load(&self, thin: bool, order: Ordering) -> Pair {
+        unsafe {
+            if thin {
+                (self.thin.load(order), 0)
+            } else {
+                u128_to_pair(self.wide.load(order))
+            }
+        }
+    }
+
+    // the initial guess of a CAS loop, it may be torn since the CAS validates it
+    #[inline]
+    fn load_hint(&self, thin: bool) -> Pair {
+        #[cfg(rcu_cell_atomic_u128)]
+        return self.load(thin, Ordering::Relaxed);
+        #[cfg(not(rcu_cell_atomic_u128))]
+        unsafe {
+            if thin {
+                (self.thin.load(Ordering::Relaxed), 0)
+            } else {
+                u128_to_pair(self.wide.load_hint())
+            }
+        }
+    }
+
+    #[inline]
+    fn cas(
+        &self,
+        thin: bool,
+        weak: bool,
+        old: Pair,
+        new: Pair,
+        s: Ordering,
+        f: Ordering,
+    ) -> Result<Pair, Pair> {
+        unsafe {
+            if thin {
+                let r = if weak {
+                    self.thin.compare_exchange_weak(old.0, new.0, s, f)
+                } else {
+                    self.thin.compare_exchange(old.0, new.0, s, f)
+                };
+                r.map(|v| (v, 0)).map_err(|v| (v, 0))
+            } else {
+                let (old, new) = (pair_to_u128(old), pair_to_u128(new));
+                let r = if weak {
+                    self.wide.compare_exchange_weak(old, new, s, f)
+                } else {
+                    self.wide.compare_exchange(old, new, s, f)
+                };
+                r.map(u128_to_pair).map_err(u128_to_pair)
+            }
+        }
+    }
+
+    #[inline]
+    fn fetch_add(&self, thin: bool, order: Ordering) -> Pair {
+        unsafe {
+            if thin {
+                (self.thin.fetch_add(1, order), 0)
+            } else {
+                u128_to_pair(self.wide.fetch_add(1, order))
+            }
+        }
+    }
+
+    #[inline]
+    fn fetch_sub(&self, thin: bool, order: Ordering) {
+        unsafe {
+            if thin {
+                self.thin.fetch_sub(1, order);
+            } else {
+                self.wide.fetch_sub(1, order);
+            }
+        }
+    }
 }
 
 /// A wrapper of the pointer to the inner Arc data.
@@ -59,17 +147,8 @@ impl<T: ?Sized> LinkWrapper<T> {
     const IS_THIN: bool = core::mem::size_of::<*const T>() == core::mem::size_of::<usize>();
     #[inline]
     pub(crate) const fn new() -> Self {
-        let storage = if Self::IS_THIN {
-            Storage {
-                thin: ManuallyDrop::new(AtomicUsize::new(0)),
-            }
-        } else {
-            Storage {
-                wide: ManuallyDrop::new(AtomicU128::new(0)),
-            }
-        };
         LinkWrapper {
-            storage,
+            storage: Storage::new(Self::IS_THIN, (0, 0)),
             phantom: PhantomData,
         }
     }
@@ -124,95 +203,34 @@ impl<T: ?Sized> LinkWrapper<T> {
 
     #[inline]
     fn load(&self, order: Ordering) -> Pair {
-        unsafe {
-            if Self::IS_THIN {
-                (self.storage.thin.load(order), 0)
-            } else {
-                u128_to_pair(self.storage.wide.load(order))
-            }
-        }
+        self.storage.load(Self::IS_THIN, order)
     }
 
-    // the initial guess of a CAS loop, it may be torn since the CAS validates it
     #[inline]
     fn load_hint(&self) -> Pair {
-        #[cfg(rcu_cell_atomic_u128)]
-        return self.load(Ordering::Relaxed);
-        #[cfg(not(rcu_cell_atomic_u128))]
-        unsafe {
-            if Self::IS_THIN {
-                (self.storage.thin.load(Ordering::Relaxed), 0)
-            } else {
-                u128_to_pair(self.storage.wide.load_hint())
-            }
-        }
+        self.storage.load_hint(Self::IS_THIN)
     }
 
     #[inline]
     fn cas_weak(&self, old: Pair, new: Pair, s: Ordering, f: Ordering) -> Result<Pair, Pair> {
-        unsafe {
-            if Self::IS_THIN {
-                match self.storage.thin.compare_exchange_weak(old.0, new.0, s, f) {
-                    Ok(v) => Ok((v, 0)),
-                    Err(v) => Err((v, 0)),
-                }
-            } else {
-                match self.storage.wide.compare_exchange_weak(
-                    pair_to_u128(old),
-                    pair_to_u128(new),
-                    s,
-                    f,
-                ) {
-                    Ok(v) => Ok(u128_to_pair(v)),
-                    Err(v) => Err(u128_to_pair(v)),
-                }
-            }
-        }
+        self.storage.cas(Self::IS_THIN, true, old, new, s, f)
     }
 
     #[inline]
     fn cas(&self, old: Pair, new: Pair, s: Ordering, f: Ordering) -> Result<Pair, Pair> {
-        unsafe {
-            if Self::IS_THIN {
-                match self.storage.thin.compare_exchange(old.0, new.0, s, f) {
-                    Ok(v) => Ok((v, 0)),
-                    Err(v) => Err((v, 0)),
-                }
-            } else {
-                match self
-                    .storage
-                    .wide
-                    .compare_exchange(pair_to_u128(old), pair_to_u128(new), s, f)
-                {
-                    Ok(v) => Ok(u128_to_pair(v)),
-                    Err(v) => Err(u128_to_pair(v)),
-                }
-            }
-        }
+        self.storage.cas(Self::IS_THIN, false, old, new, s, f)
     }
 
     // the reference count lives in the lower bits of the first word, and the
     // count is checked not to overflow, so there is no carry into the metadata
     #[inline]
     fn add_ref(&self) -> Pair {
-        unsafe {
-            if Self::IS_THIN {
-                (self.storage.thin.fetch_add(1, Ordering::Acquire), 0)
-            } else {
-                u128_to_pair(self.storage.wide.fetch_add(1, Ordering::Acquire))
-            }
-        }
+        self.storage.fetch_add(Self::IS_THIN, Ordering::Acquire)
     }
 
     #[inline]
     fn sub_ref(&self) {
-        unsafe {
-            if Self::IS_THIN {
-                self.storage.thin.fetch_sub(1, Ordering::Release);
-            } else {
-                self.storage.wide.fetch_sub(1, Ordering::Release);
-            }
-        }
+        self.storage.fetch_sub(Self::IS_THIN, Ordering::Release);
     }
 
     #[inline]
@@ -243,17 +261,8 @@ impl<T: ?Sized> LinkWrapper<T> {
         debug_assert!(addr & LOWER_MASK == 0);
         debug_assert!(addr & HIGHER_MASK == 0);
         let word = addr << LEADING_BITS;
-        let storage = if Self::IS_THIN {
-            Storage {
-                thin: ManuallyDrop::new(AtomicUsize::new(word)),
-            }
-        } else {
-            Storage {
-                wide: ManuallyDrop::new(AtomicU128::new(pair_to_u128((word, meta)))),
-            }
-        };
         LinkWrapper {
-            storage,
+            storage: Storage::new(Self::IS_THIN, (word, meta)),
             phantom: PhantomData,
         }
     }
@@ -324,12 +333,12 @@ impl<T: ?Sized> LinkWrapper<T> {
         let backoff = crossbeam_utils::Backoff::new();
         // wait all reader release
         loop {
-            let old = (cur.0 & !UPDATE_REF_MASK | UPDTATE_MASK, cur.1);
+            let old = (cur.0 & !UPDATE_REF_MASK | UPDATE_MASK, cur.1);
             let new = (new_word, if addr == 0 { cur.1 } else { meta });
             match self.cas_weak(old, new, Release, Relaxed) {
                 Ok(_) => {
                     core::sync::atomic::fence(Ordering::Acquire);
-                    return Self::word_to_ptr((old.0 & !UPDTATE_MASK, old.1));
+                    return Self::word_to_ptr((old.0 & !UPDATE_MASK, old.1));
                 }
                 Err(c) => {
                     cur = c;
@@ -373,8 +382,8 @@ impl<T: ?Sized> LinkWrapper<T> {
 
         let backoff = crossbeam_utils::Backoff::new();
         loop {
-            let old = (cur.0 & !UPDTATE_MASK, cur.1); // clear the update flag
-            let new = (cur.0 | UPDTATE_MASK, cur.1); // set the update flag
+            let old = (cur.0 & !UPDATE_MASK, cur.1); // clear the update flag
+            let new = (cur.0 | UPDATE_MASK, cur.1); // set the update flag
 
             let refs = old.0 & UPDATE_REF_MASK;
             assert!(refs < UPDATE_REF_MASK, "Too many references");

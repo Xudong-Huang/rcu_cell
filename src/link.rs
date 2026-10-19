@@ -11,6 +11,18 @@
 //   or when build.rs finds that the build machine, which is also the target, supports it
 //   and not under Miri. This works on stable.
 
+// the layout of the tagged address word: the address is shifted left by `LEADING_BITS`,
+// the low bits hold the reader count and the highest of them is the update flag
+pub(super) const LEADING_BITS: usize = 8;
+pub(super) const ALIGN_BITS: usize = 3;
+
+pub(super) const LOWER_MASK: usize = (1 << ALIGN_BITS) - 1;
+pub(super) const HIGHER_MASK: usize =
+    !((1 << (usize::MAX.leading_ones() as usize - LEADING_BITS)) - 1);
+pub(super) const REFCOUNT_MASK: usize = (1 << (LEADING_BITS + ALIGN_BITS)) - 1;
+pub(super) const UPDATE_MASK: usize = 1 << (LEADING_BITS + ALIGN_BITS - 1);
+pub(super) const UPDATE_REF_MASK: usize = REFCOUNT_MASK & !UPDATE_MASK;
+
 #[cfg(rcu_cell_cx16)]
 mod atomic128;
 

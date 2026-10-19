@@ -4,14 +4,7 @@ use core::mem::MaybeUninit;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-const LEADING_BITS: usize = 8;
-const ALIGN_BITS: usize = 3;
-
-const LOWER_MASK: usize = (1 << ALIGN_BITS) - 1;
-const HIGHER_MASK: usize = !((1 << (usize::MAX.leading_ones() as usize - LEADING_BITS)) - 1);
-const REFCOUNT_MASK: usize = (1 << (LEADING_BITS + ALIGN_BITS)) - 1;
-const UPDTATE_MASK: usize = 1 << (LEADING_BITS + ALIGN_BITS - 1);
-const UPDATE_REF_MASK: usize = REFCOUNT_MASK & !UPDTATE_MASK;
+use super::{HIGHER_MASK, LEADING_BITS, LOWER_MASK, REFCOUNT_MASK, UPDATE_MASK, UPDATE_REF_MASK};
 
 #[inline]
 fn ptr_to_addr<T: ?Sized>(ptr: *const T) -> usize {
@@ -208,17 +201,17 @@ impl<T: ?Sized> LinkWrapper<T> {
         debug_assert!(addr & LOWER_MASK == 0);
         debug_assert!(addr & HIGHER_MASK == 0);
         let new = addr << LEADING_BITS;
-        let mut old = self.ptr().load(Relaxed) & !UPDATE_REF_MASK | UPDTATE_MASK;
+        let mut old = self.ptr().load(Relaxed) & !UPDATE_REF_MASK | UPDATE_MASK;
 
         let backoff = crossbeam_utils::Backoff::new();
         // wait all reader release
         while let Err(addr) = self.ptr().compare_exchange_weak(old, new, Release, Relaxed) {
-            old = addr & !UPDATE_REF_MASK | UPDTATE_MASK;
+            old = addr & !UPDATE_REF_MASK | UPDATE_MASK;
             backoff.snooze();
         }
 
         core::sync::atomic::fence(Ordering::Acquire);
-        let addr = (old & !UPDTATE_MASK) >> LEADING_BITS;
+        let addr = (old & !UPDATE_MASK) >> LEADING_BITS;
         self.addr_to_ptr(addr)
     }
 
@@ -259,8 +252,8 @@ impl<T: ?Sized> LinkWrapper<T> {
 
         let backoff = crossbeam_utils::Backoff::new();
         let old = loop {
-            let old = cur & !UPDTATE_MASK; // clear the update flag
-            let new = cur | UPDTATE_MASK; // set the update flag
+            let old = cur & !UPDATE_MASK; // clear the update flag
+            let new = cur | UPDATE_MASK; // set the update flag
 
             // checked on every retry, the count may have changed
             let refs = old & UPDATE_REF_MASK;
