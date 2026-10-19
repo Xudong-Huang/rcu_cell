@@ -2,7 +2,7 @@
 name = "rcu_cell"
 edition = "2021"
 rust-version = "1.84"
-version = "1.2.3"
+version = "1.2.4"
 description = "a lockless rcu cell implementation"
 authors = ["Xudong Huang <huangxu008@hotmail.com>"]
 categories = ["concurrency", "data-structures", "no-std"]
