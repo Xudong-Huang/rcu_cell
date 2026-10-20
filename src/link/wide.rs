@@ -7,7 +7,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(rcu_cell_atomic_u128)]
 use core::sync::atomic::AtomicU128;
 
-#[cfg(not(rcu_cell_atomic_u128))]
+#[cfg(rcu_cell_cx16)]
 use super::atomic128::AtomicU128;
 
 use super::{HIGHER_MASK, LEADING_BITS, LOWER_MASK, REFCOUNT_MASK, UPDATE_MASK, UPDATE_REF_MASK};
