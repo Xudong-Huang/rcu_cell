@@ -284,6 +284,9 @@ impl<T: ?Sized> RcuCell<T> {
     /// read out the inner Arc value
     #[inline]
     pub fn read(&self) -> Option<Arc<T>> {
+        // `inc_ref`/`dec_ref` is the read-side critical section: the pointer is only
+        // borrowed, and a concurrent writer could drop the old `Arc` after swapping it
+        // out. The clone must stay inside so the writer waits for it to finish.
         let ptr = self.link.inc_ref();
         let v = ManuallyDrop::new(ptr_to_arc(ptr));
         let cloned = v.as_ref().cloned();
