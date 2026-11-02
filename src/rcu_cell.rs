@@ -205,6 +205,9 @@ impl<T: ?Sized> RcuCell<T> {
             self.link.check_meta(Arc::as_ptr(&data));
             arc_into_ptr(data)
         });
+        // if `f` panics, the `UnlockOnPanic` will release the link
+        // and prevent other writers from spinning forever.
+        //Otherwise, we manually unlock the link after updating it.
         core::mem::forget(unlock);
         self.link.unlock_update(new_ptr);
         ManuallyDrop::into_inner(old_value)
