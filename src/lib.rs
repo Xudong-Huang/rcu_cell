@@ -211,6 +211,53 @@ mod test {
         assert_eq!(a.read().map(|v| *v), Some(5678));
     }
 
+    #[test]
+    fn cas_weak_test() {
+        use alloc::sync::Weak;
+        use Ordering::SeqCst;
+
+        let a = Arc::new(1234);
+        let b = Arc::new(5678);
+        let w = RcuWeak::from(Arc::downgrade(&a));
+
+        let curr = w.read();
+        let curr_ptr = Weak::as_ptr(&curr);
+        let new = Arc::downgrade(&b);
+        let res1 = unsafe { w.compare_exchange(curr_ptr, Some(&new), SeqCst, SeqCst) }.unwrap();
+        assert_eq!(res1, curr_ptr);
+        assert!(Arc::ptr_eq(&w.upgrade().unwrap(), &b));
+
+        // the old pointer is stale now
+        assert!(unsafe { w.compare_exchange(curr_ptr, None, SeqCst, SeqCst) }.is_err());
+        // the cell is not empty, a null current does not match
+        assert!(unsafe { w.compare_exchange(core::ptr::null(), None, SeqCst, SeqCst) }.is_err());
+
+        let cur = w.read();
+        assert!(unsafe { w.compare_exchange(Weak::as_ptr(&cur), None, SeqCst, SeqCst) }.is_ok());
+        assert!(w.upgrade().is_none());
+
+        // an empty cell matches a null pointer...
+        let null = core::ptr::null();
+        let res = unsafe { w.compare_exchange(null, Some(&new), SeqCst, SeqCst) };
+        assert!(res.is_ok());
+        assert_eq!(res.unwrap(), null);
+        assert!(Arc::ptr_eq(&w.upgrade().unwrap(), &b));
+        // ...and, once empty, the pointer of a dangling weak, which is what `read` returns
+        assert!(w.take().upgrade().is_some());
+        let dangling: Weak<u32> = Weak::new();
+        let res = unsafe { w.compare_exchange(Weak::as_ptr(&dangling), None, SeqCst, SeqCst) };
+        assert!(res.is_ok());
+        assert!(w.upgrade().is_none());
+
+        let a2 = Arc::new(42);
+        let new2 = Arc::downgrade(&a2);
+        let cur = w.read();
+        assert!(
+            unsafe { w.compare_exchange(Weak::as_ptr(&cur), Some(&new2), SeqCst, SeqCst) }.is_ok()
+        );
+        assert_eq!(w.upgrade().map(|v| *v), Some(42));
+    }
+
     // Miri gives every unsizing its own vtable, which the fallback exact vtable check rejects
     #[cfg(not(miri))]
     #[test]
@@ -407,6 +454,33 @@ mod test {
         let cur = Arc::as_ptr(&new);
         assert!(unsafe { c.compare_exchange(cur, None, SeqCst, SeqCst) }.is_ok());
         assert!(c.is_none());
+    }
+
+    #[test]
+    fn test_weak_dyn_compare_exchange() {
+        use alloc::sync::Weak;
+        use Ordering::SeqCst;
+        let a = Arc::new(Small(1)) as Arc<dyn Id>;
+        let b = Arc::new(Big(2, 3)) as Arc<dyn Id>;
+        let w = RcuWeak::from(Arc::downgrade(&a));
+        let cur = Weak::as_ptr(&w.read());
+        let new = Arc::downgrade(&b);
+        if !WIDE_ATOMIC {
+            let r = catch_unwind(AssertUnwindSafe(|| unsafe {
+                w.compare_exchange(cur, Some(&new), SeqCst, SeqCst)
+            }));
+            assert!(r.is_err());
+            assert_eq!(w.upgrade().unwrap().id(), 1);
+            return;
+        }
+        assert!(unsafe { w.compare_exchange(cur, Some(&new), SeqCst, SeqCst) }.is_ok());
+        assert_eq!(w.upgrade().unwrap().id(), 102);
+        assert!(w.arc_eq(&b));
+        // the old pointer is stale now
+        assert!(unsafe { w.compare_exchange(cur, None, SeqCst, SeqCst) }.is_err());
+        let cur = Weak::as_ptr(&w.read());
+        assert!(unsafe { w.compare_exchange(cur, None, SeqCst, SeqCst) }.is_ok());
+        assert!(w.upgrade().is_none());
     }
 
     #[test]

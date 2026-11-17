@@ -1,6 +1,7 @@
 use alloc::sync::{Arc, Weak};
 use core::mem::ManuallyDrop;
 use core::ptr::NonNull;
+use core::sync::atomic::Ordering;
 
 use crate::link::LinkWrapper;
 
@@ -142,6 +143,97 @@ impl<T: ?Sized> RcuWeak<T> {
     pub fn write_arc(&self, data: &Arc<T>) -> Weak<T> {
         let new_ptr = self.weak_to_ptr(Arc::downgrade(data));
         self.weak_from_link(self.link.update(new_ptr))
+    }
+
+    /// Stores the optional `Weak` ref `new` into the RcuWeak if the current
+    /// value is the same as `current`, compared by the address of the target.
+    ///
+    /// An empty cell and a dangling weak (`Weak::new()`) are considered the same,
+    /// so `current` may be a pointer to a dangling weak, and a dangling `new`
+    /// clears the cell.
+    ///
+    /// The return value is a result indicating whether the new value was written and
+    /// containing the previous value. On success this value is guaranteed to be equal
+    /// to `current`.
+    ///
+    /// This method takes two `Ordering` arguments to describe the memory
+    /// ordering of this operation. `success` describes the required ordering for the
+    /// read-modify-write operation that takes place if the comparison with `current` succeeds.
+    /// `failure` describes the required ordering for the load operation that takes place when
+    /// the comparison fails. Using `Acquire` as success ordering makes the store part
+    /// of this operation `Relaxed`, and using `Release` makes the successful load
+    /// `Relaxed`. The failure ordering can only be `SeqCst`, `Acquire` or `Relaxed`
+    /// and must be equivalent to or weaker than the success ordering.
+    ///
+    /// # Safety
+    ///
+    /// don't deref the returned pointer, and don't turn it back into a `Weak` with
+    /// `Weak::from_raw`: the exchange releases the old weak ref, so the allocation
+    /// may be deallocated by other threads
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rcu_cell::RcuWeak;
+    /// use std::sync::{Arc, Weak};
+    /// use std::sync::atomic::Ordering::SeqCst;
+    ///
+    /// let a = Arc::new(1234);
+    /// let b = Arc::new(5678);
+    /// let w = RcuWeak::from(Arc::downgrade(&a));
+    /// let wb = Arc::downgrade(&b);
+    ///
+    /// let curr = Weak::as_ptr(&w.read());
+    /// let res = unsafe { w.compare_exchange(curr, Some(&wb), SeqCst, SeqCst) };
+    /// assert!(res.is_ok());
+    /// assert_eq!(w.upgrade().as_deref(), Some(&5678));
+    /// ```
+    pub unsafe fn compare_exchange<'a>(
+        &self,
+        current: *const T,
+        new: Option<&'a Weak<T>>,
+        success: Ordering,
+        failure: Ordering,
+    ) -> Result<*const T, *const T>
+    where
+        T: 'a,
+    {
+        // an empty cell and a dangling weak are the same, both are stored as an empty link
+        let current_ptr = match NonNull::new(current as *mut T) {
+            Some(ptr) if !is_dangling(ptr.as_ptr()) => Some(ptr),
+            _ => None,
+        };
+
+        let new_ptr = new.and_then(|data| {
+            let ptr = Weak::as_ptr(data);
+            // a dangling weak is stored as an empty link
+            if is_dangling(ptr) {
+                return None;
+            }
+            self.link.check_meta(ptr);
+            Some(unsafe { NonNull::new_unchecked(ptr as *mut T) })
+        });
+
+        let to_raw = |ptr: Option<NonNull<T>>| match ptr {
+            Some(p) => p.as_ptr() as *const T,
+            None => self.link.null(),
+        };
+
+        match self
+            .link
+            .compare_exchange(current_ptr, new_ptr, success, failure)
+        {
+            Ok(old) => {
+                // drop the weak ref held by the cell
+                let _ = ptr_to_weak(old);
+                // the cell now holds the new value, clone one weak ref and forget it
+                if let Some(data) = new {
+                    let _ = Weak::into_raw(Weak::clone(data));
+                }
+                Ok(current)
+            }
+            Err(actual) => Err(to_raw(actual)),
+        }
     }
 
     /// read out the inner weak value
