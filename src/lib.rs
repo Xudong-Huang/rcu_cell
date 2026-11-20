@@ -111,15 +111,35 @@ mod test {
     #[test]
     fn test_rcu_update() {
         let t = RcuCell::new(Some(10));
-        let old = t.update(|v| v.map(|x| *x + 1));
+        let old = t.update(|v| v.map(|x| **x + 1));
         assert_eq!(t.read().map(|v| *v), Some(11));
         assert_eq!(old.map(|v| *v), Some(10));
         let old = t.update(|v| match v {
-            Some(x) if *x == 11 => None,
+            Some(x) if **x == 11 => None,
             _ => Some(42),
         });
         assert!(t.read().is_none());
         assert_eq!(old.map(|v| *v), Some(11));
+    }
+
+    #[test]
+    fn test_compare_and_swap() {
+        let t = RcuCell::new(10);
+        let current = t.read().unwrap();
+        let other = Arc::new(11);
+        // a different pointer must not exchange
+        assert!(!t.compare_and_swap(&other, Some(&other)));
+        assert_eq!(t.read().map(|v| *v), Some(10));
+        // exchanging the matching value succeeds and `current` stays valid
+        assert!(t.compare_and_swap(&current, Some(&other)));
+        assert_eq!(*current, 10);
+        assert_eq!(t.read().map(|v| *v), Some(11));
+        assert!(!t.compare_and_swap(&current, Some(&other)));
+        // exchange the current value to empty
+        let current = t.read().unwrap();
+        assert!(t.compare_and_swap(&current, None));
+        assert!(t.read().is_none());
+        assert_eq!(*current, 11);
     }
 
     #[test]
@@ -256,6 +276,85 @@ mod test {
             unsafe { w.compare_exchange(Weak::as_ptr(&cur), Some(&new2), SeqCst, SeqCst) }.is_ok()
         );
         assert_eq!(w.upgrade().map(|v| *v), Some(42));
+    }
+
+    #[test]
+    fn test_rcu_weak_update() {
+        use alloc::sync::Weak;
+
+        let a = Arc::new(10);
+        let b = Arc::new(11);
+        let w = RcuWeak::from(Arc::downgrade(&a));
+
+        // the closure borrows the old weak and stores a different one
+        let old = w
+            .update(|v| {
+                assert_eq!(v.unwrap().upgrade().map(|v| *v), Some(10));
+                Some(Arc::downgrade(&b))
+            })
+            .unwrap();
+        assert_eq!(old.upgrade().map(|v| *v), Some(10));
+        assert_eq!(w.upgrade().map(|v| *v), Some(11));
+
+        // returning `None` clears the cell
+        let old = w.update(|v| {
+            assert_eq!(v.unwrap().upgrade().map(|v| *v), Some(11));
+            None::<Weak<i32>>
+        });
+        assert_eq!(old.unwrap().upgrade().map(|v| *v), Some(11));
+        assert!(w.upgrade().is_none());
+        // the next closure sees an empty cell
+        assert!(w.update(|v| v.cloned()).is_none());
+        assert!(w.upgrade().is_none());
+    }
+
+    #[test]
+    fn test_weak_update_panic_unlocks() {
+        use alloc::sync::Weak;
+
+        let a = Arc::new(1);
+        let w = RcuWeak::from(Arc::downgrade(&a));
+        let r = catch_unwind(AssertUnwindSafe(|| {
+            w.update(|_| -> Option<Weak<i32>> { panic!("boom") })
+        }));
+        assert!(r.is_err());
+        // the old value is kept and the cell is still usable
+        assert_eq!(w.upgrade().map(|v| *v), Some(1));
+        let b = Arc::new(2);
+        assert_eq!(w.write(Arc::downgrade(&b)).upgrade().map(|v| *v), Some(1));
+        assert_eq!(w.upgrade().map(|v| *v), Some(2));
+    }
+
+    #[test]
+    fn test_weak_compare_and_swap() {
+        use alloc::sync::Weak;
+
+        let a = Arc::new(10);
+        let b = Arc::new(11);
+        let w = RcuWeak::from(Arc::downgrade(&a));
+        let current = w.read();
+        let other = Arc::downgrade(&b);
+
+        // a different pointer must not exchange
+        assert!(!w.compare_and_swap(&other, Some(&other)));
+        assert_eq!(w.upgrade().map(|v| *v), Some(10));
+
+        // exchanging the matching value succeeds and `current` stays valid
+        assert!(w.compare_and_swap(&current, Some(&other)));
+        assert_eq!(current.upgrade().map(|v| *v), Some(10));
+        assert_eq!(w.upgrade().map(|v| *v), Some(11));
+        assert!(!w.compare_and_swap(&current, Some(&other)));
+
+        // exchange the current value to empty
+        let current = w.read();
+        assert!(w.compare_and_swap(&current, None));
+        assert!(w.upgrade().is_none());
+        assert_eq!(current.upgrade().map(|v| *v), Some(11));
+
+        // an empty cell matches the dangling weak returned by `read`
+        let dangling: Weak<i32> = w.read();
+        assert!(w.compare_and_swap(&dangling, Some(&other)));
+        assert_eq!(w.upgrade().map(|v| *v), Some(11));
     }
 
     // Miri gives every unsizing its own vtable, which the fallback exact vtable check rejects
@@ -601,7 +700,7 @@ mod test {
         // the old value is kept and the cell is still usable
         assert_eq!(c.read().map(|v| *v), Some(1));
         assert_eq!(c.write(2).map(|v| *v), Some(1));
-        assert_eq!(c.update(|v| v.map(|v| *v + 1)).map(|v| *v), Some(2));
+        assert_eq!(c.update(|v| v.map(|v| **v + 1)).map(|v| *v), Some(2));
         assert_eq!(c.read().map(|v| *v), Some(3));
     }
 }

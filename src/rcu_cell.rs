@@ -3,7 +3,7 @@ use core::mem::ManuallyDrop;
 use core::ptr::NonNull;
 use core::sync::atomic::Ordering;
 
-use crate::link::LinkWrapper;
+use crate::link::{LinkWrapper, UnlockOnPanic};
 
 #[inline]
 fn ptr_to_arc<T: ?Sized>(ptr: Option<NonNull<T>>) -> Option<Arc<T>> {
@@ -18,17 +18,6 @@ fn arc_into_ptr<T: ?Sized>(data: Arc<T>) -> NonNull<T> {
 #[inline]
 fn same_addr<T: ?Sized>(a: Option<NonNull<T>>, b: Option<NonNull<T>>) -> bool {
     a.map(|p| p.cast::<()>()) == b.map(|p| p.cast::<()>())
-}
-
-struct UnlockOnPanic<'a, T: ?Sized> {
-    link: &'a LinkWrapper<T>,
-    ptr: Option<NonNull<T>>,
-}
-
-impl<T: ?Sized> Drop for UnlockOnPanic<'_, T> {
-    fn drop(&mut self) {
-        self.link.unlock_update(self.ptr);
-    }
 }
 
 /// RCU cell, it behaves like `RwLock<Option<Arc<T>>>`
@@ -184,9 +173,13 @@ impl<T: ?Sized> RcuCell<T> {
     /// The closure will be called with the old value and return the new value.
     /// The closure should not take too long time, internally it's use a spin
     /// lock to prevent other writer to update the value
+    ///
+    /// The closure borrows the old value, so no `Arc` refcount increment or
+    /// decrement is needed while the lock is held. If you need to own the old
+    /// `Arc`, call `.cloned()` on it inside the closure.
     pub fn update<R, F>(&self, f: F) -> Option<Arc<T>>
     where
-        F: FnOnce(Option<Arc<T>>) -> Option<R>,
+        F: FnOnce(Option<&Arc<T>>) -> Option<R>,
         R: Into<Arc<T>>,
     {
         // increase ref count to lock the inner Arc
@@ -200,17 +193,39 @@ impl<T: ?Sized> RcuCell<T> {
             link: &self.link,
             ptr,
         };
-        let new_ptr = f((*old_value).clone()).map(|data| {
+        let new_ptr = f((*old_value).as_ref()).map(|data| {
             let data = data.into();
             self.link.check_meta(Arc::as_ptr(&data));
             arc_into_ptr(data)
         });
         // if `f` panics, the `UnlockOnPanic` will release the link
         // and prevent other writers from spinning forever.
-        //Otherwise, we manually unlock the link after updating it.
+        // Otherwise, we manually unlock the link after updating it.
         core::mem::forget(unlock);
         self.link.unlock_update(new_ptr);
         ManuallyDrop::into_inner(old_value)
+    }
+
+    /// Replace the value with `new` only if the cell currently holds
+    /// `current`, and return whether the exchange happened.
+    ///
+    /// This is a safe wrapper around [`compare_exchange`](Self::compare_exchange)
+    /// that discards the returned pointer. If the values differ the cell is left
+    /// untouched and no writer lock is taken, so it is cheaper than
+    /// [`update`](Self::update) for a conditional write.
+    #[inline]
+    pub fn compare_and_swap(&self, current: &Arc<T>, new: Option<&Arc<T>>) -> bool {
+        // Safety: the returned pointer is neither dereferenced nor turned into
+        // an `Arc`, and both arguments are valid for the duration of the call.
+        unsafe {
+            self.compare_exchange(
+                Arc::as_ptr(current),
+                new,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+        }
+        .is_ok()
     }
 
     /// Stores the optional Arc ref `new` into the RcuCell if the current

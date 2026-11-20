@@ -35,3 +35,18 @@ pub(crate) use wide::LinkWrapper;
 mod narrow;
 #[cfg(not(rcu_cell_wide))]
 pub(crate) use narrow::LinkWrapper;
+
+use core::ptr::NonNull;
+
+/// Releases the writer lock when an update closure panics, so later writers
+/// don't spin forever.
+pub(crate) struct UnlockOnPanic<'a, T: ?Sized> {
+    pub(crate) link: &'a LinkWrapper<T>,
+    pub(crate) ptr: Option<NonNull<T>>,
+}
+
+impl<T: ?Sized> Drop for UnlockOnPanic<'_, T> {
+    fn drop(&mut self) {
+        self.link.unlock_update(self.ptr);
+    }
+}

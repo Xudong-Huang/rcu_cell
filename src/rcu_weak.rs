@@ -3,7 +3,7 @@ use core::mem::ManuallyDrop;
 use core::ptr::NonNull;
 use core::sync::atomic::Ordering;
 
-use crate::link::LinkWrapper;
+use crate::link::{LinkWrapper, UnlockOnPanic};
 
 #[inline]
 fn ptr_to_weak<T: ?Sized>(ptr: Option<NonNull<T>>) -> Option<Weak<T>> {
@@ -143,6 +143,69 @@ impl<T: ?Sized> RcuWeak<T> {
     pub fn write_arc(&self, data: &Arc<T>) -> Weak<T> {
         let new_ptr = self.weak_to_ptr(Arc::downgrade(data));
         self.weak_from_link(self.link.update(new_ptr))
+    }
+
+    /// Atomicly update the value with a closure and return the old value.
+    /// The closure will be called with the old value and return the new value;
+    /// returning `None` clears the cell. The return value is the old weak value,
+    /// or `None` if the cell was empty.
+    /// The closure should not take too long time, internally it's use a spin
+    /// lock to prevent other writer to update the value
+    ///
+    /// The closure borrows the old value, so no `Weak` refcount increment or
+    /// decrement is needed while the lock is held. If you need to own the old
+    /// `Weak`, call `.cloned()` on it inside the closure.
+    pub fn update<R, F>(&self, f: F) -> Option<Weak<T>>
+    where
+        F: FnOnce(Option<&Weak<T>>) -> Option<R>,
+        R: Into<Weak<T>>,
+    {
+        // increase ref count to lock the inner Weak
+        let ptr = self.link.lock_read();
+        // the cell still owns this Weak until the update is done, so a panic
+        // in `f` or in the metadata check must not drop it
+        let old_value = ManuallyDrop::new(ptr_to_weak(ptr));
+        // if `f` panics, put the old value back and release the lock, otherwise
+        // every later writer would spin forever
+        let unlock = UnlockOnPanic {
+            link: &self.link,
+            ptr,
+        };
+        // a dangling weak is stored as an empty link
+        let new_ptr = f((*old_value).as_ref()).and_then(|data| self.weak_to_ptr(data.into()));
+        // if `f` panics, the `UnlockOnPanic` will release the link
+        // and prevent other writers from spinning forever.
+        // Otherwise, we manually unlock the link after updating it.
+        core::mem::forget(unlock);
+        self.link.unlock_update(new_ptr);
+        ManuallyDrop::into_inner(old_value)
+    }
+
+    /// Replace the value with `new` only if the cell currently holds
+    /// `current`, compared by the address of the target, and return whether the
+    /// exchange happened.
+    ///
+    /// An empty cell and a dangling weak (`Weak::new()`, or the `Weak` returned
+    /// by [`read`](Self::read) for an empty cell) are considered the same, so a
+    /// dangling `new` clears the cell.
+    ///
+    /// This is a safe wrapper around [`compare_exchange`](Self::compare_exchange)
+    /// that discards the returned pointer. If the values differ the cell is left
+    /// untouched and no writer lock is taken, so it is cheaper than
+    /// [`update`](Self::update) for a conditional write.
+    #[inline]
+    pub fn compare_and_swap(&self, current: &Weak<T>, new: Option<&Weak<T>>) -> bool {
+        // Safety: the returned pointer is neither dereferenced nor turned into
+        // a `Weak`, and both arguments are valid for the duration of the call.
+        unsafe {
+            self.compare_exchange(
+                Weak::as_ptr(current),
+                new,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+        }
+        .is_ok()
     }
 
     /// Stores the optional `Weak` ref `new` into the RcuWeak if the current
