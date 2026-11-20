@@ -168,7 +168,7 @@ impl<T: ?Sized> LinkWrapper<T> {
                     if addr != old_addr {
                         return Err(self.addr_to_ptr(addr));
                     }
-                    backoff.snooze();
+                    backoff.spin();
                 }
             }
         }
@@ -186,7 +186,7 @@ impl<T: ?Sized> LinkWrapper<T> {
         // wait all reader release
         while let Err(addr) = self.ptr().compare_exchange_weak(old, new, Release, Relaxed) {
             old = addr & !REFCOUNT_MASK;
-            backoff.snooze();
+            backoff.spin();
         }
 
         core::sync::atomic::fence(Ordering::Acquire);
@@ -207,7 +207,7 @@ impl<T: ?Sized> LinkWrapper<T> {
         // wait all reader release
         while let Err(addr) = self.ptr().compare_exchange_weak(old, new, Release, Relaxed) {
             old = addr & !UPDATE_REF_MASK | UPDATE_MASK;
-            backoff.snooze();
+            backoff.spin();
         }
 
         core::sync::atomic::fence(Ordering::Acquire);
@@ -263,7 +263,7 @@ impl<T: ?Sized> LinkWrapper<T> {
                 Ok(_) => break old,
                 Err(c) => {
                     cur = c;
-                    backoff.snooze();
+                    backoff.spin();
                 }
             }
         };

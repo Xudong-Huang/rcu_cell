@@ -289,7 +289,7 @@ impl<T: ?Sized> LinkWrapper<T> {
             let new = (new_addr << LEADING_BITS, new_meta);
             match self.cas((old_word, cur_meta), new, success, failure) {
                 Ok(_) => return Ok(Self::word_to_ptr((old_word, cur_meta))),
-                Err(_) => backoff.snooze(),
+                Err(_) => backoff.spin(),
             }
         }
     }
@@ -315,7 +315,7 @@ impl<T: ?Sized> LinkWrapper<T> {
                 }
                 Err(c) => {
                     cur = c;
-                    backoff.snooze();
+                    backoff.spin();
                 }
             }
         }
@@ -342,7 +342,7 @@ impl<T: ?Sized> LinkWrapper<T> {
                 }
                 Err(c) => {
                     cur = c;
-                    backoff.snooze();
+                    backoff.spin();
                 }
             }
         }
@@ -395,7 +395,7 @@ impl<T: ?Sized> LinkWrapper<T> {
                 }
                 Err(c) => {
                     cur = c;
-                    backoff.snooze();
+                    backoff.spin();
                 }
             }
         }
