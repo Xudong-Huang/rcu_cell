@@ -160,6 +160,10 @@ impl<T: ?Sized> LinkWrapper<T> {
             match self.ptr().compare_exchange(old, new, success, failure) {
                 Ok(_addr) => {
                     // assert_eq!(old, addr);
+                    // the caller drops the old value, so order that drop after the
+                    // release store that published it even if `success` is weaker
+                    // than `Acquire`
+                    core::sync::atomic::fence(Ordering::Acquire);
                     return Ok(current);
                 }
                 Err(addr) => {

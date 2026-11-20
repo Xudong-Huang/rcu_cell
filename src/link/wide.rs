@@ -292,7 +292,13 @@ impl<T: ?Sized> LinkWrapper<T> {
             let new_meta = if new_addr == 0 { cur_meta } else { new_meta };
             let new = (new_addr << LEADING_BITS, new_meta);
             match self.cas((old_word, cur_meta), new, success, failure) {
-                Ok(_) => return Ok(Self::word_to_ptr((old_word, cur_meta))),
+                Ok(_) => {
+                    // the caller drops the old value, so order that drop after the
+                    // release store that published it even if `success` is weaker
+                    // than `Acquire`
+                    core::sync::atomic::fence(Ordering::Acquire);
+                    return Ok(Self::word_to_ptr((old_word, cur_meta)));
+                }
                 Err(_) => backoff.spin(),
             }
         }
