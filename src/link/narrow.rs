@@ -164,7 +164,10 @@ impl<T: ?Sized> LinkWrapper<T> {
                     // release store that published it even if `success` is weaker
                     // than `Acquire`
                     core::sync::atomic::fence(Ordering::Acquire);
-                    return Ok(current);
+                    // rebuild the pointer from the stored metadata: the caller's
+                    // pointer may carry a different length or vtable for the same
+                    // address, and the old value must be dropped with the right one
+                    return Ok(self.addr_to_ptr(old_addr));
                 }
                 Err(addr) => {
                     let addr = (addr & !REFCOUNT_MASK) >> LEADING_BITS;
