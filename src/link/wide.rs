@@ -279,8 +279,12 @@ impl<T: ?Sized> LinkWrapper<T> {
 
         let backoff = crossbeam_utils::Backoff::new();
         loop {
-            // only the address identifies the value, the metadata follows it
-            let (cur_word, cur_meta) = self.load(Ordering::Relaxed);
+            // Only the address identifies the value, the metadata follows it.
+            // Load with the caller's failure ordering: this value is returned
+            // when the address does not match, and the caller relies on this
+            // load to order its subsequent reads. The narrow link gets the
+            // same ordering from the failed compare-exchange.
+            let (cur_word, cur_meta) = self.load(failure);
             if cur_word & !REFCOUNT_MASK != old_word {
                 return Err(Self::word_to_ptr((cur_word, cur_meta)));
             }
