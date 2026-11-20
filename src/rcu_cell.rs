@@ -272,10 +272,13 @@ impl<T: ?Sized> RcuCell<T> {
     where
         T: 'a,
     {
+        // Take the cell's ref before the pointer is published: once the link holds
+        // it, a concurrent writer may swap it out and drop it, so the cell must
+        // already own it. The ref is released again if the exchange fails.
         let new_ptr = new.map(|data| {
             let ptr = Arc::as_ptr(data);
             self.link.check_meta(ptr);
-            unsafe { NonNull::new_unchecked(ptr as *mut T) }
+            unsafe { NonNull::new_unchecked(Arc::into_raw(Arc::clone(data)) as *mut T) }
         });
         let current = NonNull::new(current as *mut T);
 
@@ -284,19 +287,23 @@ impl<T: ?Sized> RcuCell<T> {
             None => self.link.null(),
         };
 
-        self.link
+        match self
+            .link
             .compare_exchange(current, new_ptr, success, failure)
-            .inspect(|ptr| {
+        {
+            Ok(old) => {
                 // drop the old arc in the rcu cell
-                let _ = ptr_to_arc(*ptr);
-                // we have succeed to exchange the arc
-                if let Some(v) = new {
-                    // clone and forget the arc that hold by rcu cell
-                    let _ = Arc::into_raw(Arc::clone(v));
+                let _ = ptr_to_arc(old);
+                Ok(to_raw(old))
+            }
+            Err(actual) => {
+                // we failed to exchange, so give the ref we took back
+                if let Some(ptr) = new_ptr {
+                    drop(unsafe { Arc::from_raw(ptr.as_ptr()) });
                 }
-            })
-            .map(to_raw)
-            .map_err(to_raw)
+                Err(to_raw(actual))
+            }
+        }
     }
 
     /// read out the inner Arc value

@@ -267,6 +267,9 @@ impl<T: ?Sized> RcuWeak<T> {
             _ => None,
         };
 
+        // Take the cell's weak ref before the pointer is published: once the link
+        // holds it, a concurrent writer may swap it out and drop it, so the cell
+        // must already own it. The ref is released again if the exchange fails.
         let new_ptr = new.and_then(|data| {
             let ptr = Weak::as_ptr(data);
             // a dangling weak is stored as an empty link
@@ -274,7 +277,7 @@ impl<T: ?Sized> RcuWeak<T> {
                 return None;
             }
             self.link.check_meta(ptr);
-            Some(unsafe { NonNull::new_unchecked(ptr as *mut T) })
+            Some(unsafe { NonNull::new_unchecked(Weak::into_raw(Weak::clone(data)) as *mut T) })
         });
 
         let to_raw = |ptr: Option<NonNull<T>>| match ptr {
@@ -289,13 +292,15 @@ impl<T: ?Sized> RcuWeak<T> {
             Ok(old) => {
                 // drop the weak ref held by the cell
                 let _ = ptr_to_weak(old);
-                // the cell now holds the new value, clone one weak ref and forget it
-                if let Some(data) = new {
-                    let _ = Weak::into_raw(Weak::clone(data));
-                }
                 Ok(current)
             }
-            Err(actual) => Err(to_raw(actual)),
+            Err(actual) => {
+                // we failed to exchange, so give the weak ref we took back
+                if let Some(ptr) = new_ptr {
+                    drop(unsafe { Weak::from_raw(ptr.as_ptr()) });
+                }
+                Err(to_raw(actual))
+            }
         }
     }
 
