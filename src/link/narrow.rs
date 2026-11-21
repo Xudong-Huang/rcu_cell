@@ -74,13 +74,6 @@ impl<T: ?Sized> LinkWrapper<T> {
         NonNull::new(self.raw_at(addr)? as *mut T)
     }
 
-    /// a null pointer, panics if `T` is unsized and no value was ever written
-    #[inline]
-    pub(crate) fn null(&self) -> *const T {
-        self.raw_at(0)
-            .expect("a null pointer of an unsized type needs the metadata of a written value")
-    }
-
     // the metadata is set before the first address is published
     #[inline]
     fn addr_to_ptr(&self, addr: usize) -> Option<NonNull<T>> {

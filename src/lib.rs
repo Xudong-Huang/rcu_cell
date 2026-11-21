@@ -15,36 +15,6 @@ pub use rcu_weak::RcuWeak;
 #[cfg(not(target_pointer_width = "64"))]
 compile_error!("rcu_cell only supports 64-bit platforms");
 
-use alloc::sync::Arc;
-
-pub trait ArcPointer<T> {
-    fn as_ptr(&self) -> *const T;
-    fn into_raw(self) -> *const T;
-    /// # Safety
-    /// you must ensure the pointer is valid
-    unsafe fn from_raw(ptr: *const T) -> Self;
-}
-
-impl<T> ArcPointer<T> for Option<Arc<T>> {
-    fn as_ptr(&self) -> *const T {
-        match self {
-            Some(v) => Arc::as_ptr(v),
-            None => core::ptr::null(),
-        }
-    }
-
-    fn into_raw(self) -> *const T {
-        match self {
-            Some(v) => Arc::into_raw(v),
-            None => core::ptr::null(),
-        }
-    }
-
-    unsafe fn from_raw(ptr: *const T) -> Self {
-        (!ptr.is_null()).then(|| Arc::from_raw(ptr))
-    }
-}
-
 #[cfg(test)]
 mod test {
     extern crate std;
@@ -123,26 +93,6 @@ mod test {
     }
 
     #[test]
-    fn test_compare_and_swap() {
-        let t = RcuCell::new(10);
-        let current = t.read().unwrap();
-        let other = Arc::new(11);
-        // a different pointer must not exchange
-        assert!(!t.compare_and_swap(&other, Some(&other)));
-        assert_eq!(t.read().map(|v| *v), Some(10));
-        // exchanging the matching value succeeds and `current` stays valid
-        assert!(t.compare_and_swap(&current, Some(&other)));
-        assert_eq!(*current, 10);
-        assert_eq!(t.read().map(|v| *v), Some(11));
-        assert!(!t.compare_and_swap(&current, Some(&other)));
-        // exchange the current value to empty
-        let current = t.read().unwrap();
-        assert!(t.compare_and_swap(&current, None));
-        assert!(t.read().is_none());
-        assert_eq!(*current, 11);
-    }
-
-    #[test]
     fn test_is_none() {
         let t = RcuCell::new(10);
         assert!(!t.is_none());
@@ -213,21 +163,26 @@ mod test {
 
     #[test]
     fn cas_test() {
-        use super::ArcPointer;
         use Ordering::SeqCst;
 
         let a = RcuCell::new(1234);
 
-        let curr = a.read().as_ptr();
-        let res1 = unsafe { a.compare_exchange(curr, None, SeqCst, SeqCst) }.unwrap();
-        assert_eq!(res1, curr);
+        let curr = a.read();
+        let res1 = a
+            .compare_exchange(curr.as_ref(), None, SeqCst, SeqCst)
+            .unwrap();
+        // the old value comes back owned, equal to the caller's current
+        assert_eq!(res1.as_deref(), curr.as_deref());
         assert!(a.is_none());
-        let res2 = unsafe { a.compare_exchange(res1, Some(&Arc::new(5678)), SeqCst, SeqCst) };
-        assert!(res2.is_err());
+        let other = Arc::new(5678);
+        let res2 = a.compare_exchange(res1.as_ref(), Some(other.clone()), SeqCst, SeqCst);
+        // a failed exchange hands the caller's `new` back, not the cell's value
+        let err = res2.err().unwrap().unwrap();
+        assert!(Arc::ptr_eq(&err, &other));
 
-        let null = core::ptr::null();
-        let res2 = unsafe { a.compare_exchange(null, Some(&Arc::new(5678)), SeqCst, SeqCst) };
+        let res2 = a.compare_exchange(None, Some(Arc::new(5678)), SeqCst, SeqCst);
         assert!(res2.is_ok());
+        assert!(res2.unwrap().is_none());
         assert_eq!(a.read().map(|v| *v), Some(5678));
     }
 
@@ -241,40 +196,61 @@ mod test {
         let w = RcuWeak::from(Arc::downgrade(&a));
 
         let curr = w.read();
-        let curr_ptr = Weak::as_ptr(&curr);
         let new = Arc::downgrade(&b);
-        let res1 = unsafe { w.compare_exchange(curr_ptr, Some(&new), SeqCst, SeqCst) }.unwrap();
-        assert_eq!(res1, curr_ptr);
+        // the old weak comes back owned and still points at the old value
+        let old = w
+            .compare_exchange(&curr, new.clone(), SeqCst, SeqCst)
+            .ok()
+            .unwrap();
+        assert!(Weak::ptr_eq(&old, &curr));
         assert!(Arc::ptr_eq(&w.upgrade().unwrap(), &b));
 
         // the old pointer is stale now
-        assert!(unsafe { w.compare_exchange(curr_ptr, None, SeqCst, SeqCst) }.is_err());
-        // the cell is not empty, a null current does not match
-        assert!(unsafe { w.compare_exchange(core::ptr::null(), None, SeqCst, SeqCst) }.is_err());
+        assert!(w
+            .compare_exchange(&curr, Weak::new(), SeqCst, SeqCst)
+            .is_err());
+        // the cell is not empty, a dangling current does not match
+        let dangling: Weak<i32> = Weak::new();
+        assert!(w
+            .compare_exchange(&dangling, Weak::new(), SeqCst, SeqCst)
+            .is_err());
+
+        // a failed exchange hands the caller's `new` back, even a dangling one
+        let err = w
+            .compare_exchange(&dangling, new.clone(), SeqCst, SeqCst)
+            .err()
+            .unwrap();
+        assert!(Weak::ptr_eq(&err, &new));
+        let err = w
+            .compare_exchange(&dangling, dangling.clone(), SeqCst, SeqCst)
+            .err()
+            .unwrap();
+        assert!(Weak::ptr_eq(&err, &dangling));
 
         let cur = w.read();
-        assert!(unsafe { w.compare_exchange(Weak::as_ptr(&cur), None, SeqCst, SeqCst) }.is_ok());
+        // a dangling `new` clears the cell
+        assert!(w
+            .compare_exchange(&cur, dangling.clone(), SeqCst, SeqCst)
+            .is_ok());
         assert!(w.upgrade().is_none());
 
-        // an empty cell matches a null pointer...
-        let null = core::ptr::null();
-        let res = unsafe { w.compare_exchange(null, Some(&new), SeqCst, SeqCst) };
-        assert!(res.is_ok());
-        assert_eq!(res.unwrap(), null);
+        // an empty cell matches a dangling weak...
+        let old = w
+            .compare_exchange(&dangling, new.clone(), SeqCst, SeqCst)
+            .ok()
+            .unwrap();
+        assert!(Weak::ptr_eq(&old, &dangling));
         assert!(Arc::ptr_eq(&w.upgrade().unwrap(), &b));
-        // ...and, once empty, the pointer of a dangling weak, which is what `read` returns
+        // ...and so does the dangling weak `read` returns once empty
         assert!(w.take().upgrade().is_some());
-        let dangling: Weak<u32> = Weak::new();
-        let res = unsafe { w.compare_exchange(Weak::as_ptr(&dangling), None, SeqCst, SeqCst) };
+        let res = w.compare_exchange(&dangling, dangling.clone(), SeqCst, SeqCst);
         assert!(res.is_ok());
         assert!(w.upgrade().is_none());
 
         let a2 = Arc::new(42);
         let new2 = Arc::downgrade(&a2);
         let cur = w.read();
-        assert!(
-            unsafe { w.compare_exchange(Weak::as_ptr(&cur), Some(&new2), SeqCst, SeqCst) }.is_ok()
-        );
+        assert!(w.compare_exchange(&cur, new2, SeqCst, SeqCst).is_ok());
         assert_eq!(w.upgrade().map(|v| *v), Some(42));
     }
 
@@ -323,38 +299,6 @@ mod test {
         let b = Arc::new(2);
         assert_eq!(w.write(Arc::downgrade(&b)).upgrade().map(|v| *v), Some(1));
         assert_eq!(w.upgrade().map(|v| *v), Some(2));
-    }
-
-    #[test]
-    fn test_weak_compare_and_swap() {
-        use alloc::sync::Weak;
-
-        let a = Arc::new(10);
-        let b = Arc::new(11);
-        let w = RcuWeak::from(Arc::downgrade(&a));
-        let current = w.read();
-        let other = Arc::downgrade(&b);
-
-        // a different pointer must not exchange
-        assert!(!w.compare_and_swap(&other, Some(&other)));
-        assert_eq!(w.upgrade().map(|v| *v), Some(10));
-
-        // exchanging the matching value succeeds and `current` stays valid
-        assert!(w.compare_and_swap(&current, Some(&other)));
-        assert_eq!(current.upgrade().map(|v| *v), Some(10));
-        assert_eq!(w.upgrade().map(|v| *v), Some(11));
-        assert!(!w.compare_and_swap(&current, Some(&other)));
-
-        // exchange the current value to empty
-        let current = w.read();
-        assert!(w.compare_and_swap(&current, None));
-        assert!(w.upgrade().is_none());
-        assert_eq!(current.upgrade().map(|v| *v), Some(11));
-
-        // an empty cell matches the dangling weak returned by `read`
-        let dangling: Weak<i32> = w.read();
-        assert!(w.compare_and_swap(&dangling, Some(&other)));
-        assert_eq!(w.upgrade().map(|v| *v), Some(11));
     }
 
     // Miri gives every unsizing its own vtable, which the fallback exact vtable check rejects
@@ -535,50 +479,69 @@ mod test {
     fn test_cell_dyn_compare_exchange() {
         use Ordering::SeqCst;
         let c: RcuCell<dyn Id> = RcuCell::from(Arc::new(Small(1)) as Arc<dyn Id>);
-        let cur = Arc::as_ptr(&c.read().unwrap());
+        let cur = c.read().unwrap();
         let new = Arc::new(Big(2, 3)) as Arc<dyn Id>;
         if !WIDE_ATOMIC {
-            let r = catch_unwind(AssertUnwindSafe(|| unsafe {
-                c.compare_exchange(cur, Some(&new), SeqCst, SeqCst)
+            let r = catch_unwind(AssertUnwindSafe(|| {
+                c.compare_exchange(Some(&cur), Some(new.clone()), SeqCst, SeqCst)
             }));
             assert!(r.is_err());
             assert_eq!(c.read().unwrap().id(), 1);
             return;
         }
-        assert!(unsafe { c.compare_exchange(cur, Some(&new), SeqCst, SeqCst) }.is_ok());
+        let old = c
+            .compare_exchange(Some(&cur), Some(new.clone()), SeqCst, SeqCst)
+            .ok()
+            .unwrap()
+            .unwrap();
+        // the old value comes back owned, with the stored metadata
+        assert_eq!(old.id(), 1);
         assert_eq!(c.read().unwrap().id(), 102);
         assert!(c.arc_eq(&new));
         // the old pointer is stale now
-        assert!(unsafe { c.compare_exchange(cur, None, SeqCst, SeqCst) }.is_err());
-        let cur = Arc::as_ptr(&new);
-        assert!(unsafe { c.compare_exchange(cur, None, SeqCst, SeqCst) }.is_ok());
+        assert!(c
+            .compare_exchange(Some(&cur), None, SeqCst, SeqCst)
+            .is_err());
+        assert!(c.compare_exchange(Some(&new), None, SeqCst, SeqCst).is_ok());
         assert!(c.is_none());
     }
 
     #[test]
     fn test_weak_dyn_compare_exchange() {
-        use alloc::sync::Weak;
         use Ordering::SeqCst;
         let a = Arc::new(Small(1)) as Arc<dyn Id>;
         let b = Arc::new(Big(2, 3)) as Arc<dyn Id>;
         let w = RcuWeak::from(Arc::downgrade(&a));
-        let cur = Weak::as_ptr(&w.read());
+        let cur = w.read();
         let new = Arc::downgrade(&b);
         if !WIDE_ATOMIC {
-            let r = catch_unwind(AssertUnwindSafe(|| unsafe {
-                w.compare_exchange(cur, Some(&new), SeqCst, SeqCst)
+            let r = catch_unwind(AssertUnwindSafe(|| {
+                w.compare_exchange(&cur, new.clone(), SeqCst, SeqCst)
             }));
             assert!(r.is_err());
             assert_eq!(w.upgrade().unwrap().id(), 1);
             return;
         }
-        assert!(unsafe { w.compare_exchange(cur, Some(&new), SeqCst, SeqCst) }.is_ok());
+        let old = w
+            .compare_exchange(&cur, new.clone(), SeqCst, SeqCst)
+            .ok()
+            .unwrap();
+        // the old weak comes back owned and still upgrades to the old value
+        assert_eq!(old.upgrade().unwrap().id(), 1);
         assert_eq!(w.upgrade().unwrap().id(), 102);
         assert!(w.arc_eq(&b));
         // the old pointer is stale now
-        assert!(unsafe { w.compare_exchange(cur, None, SeqCst, SeqCst) }.is_err());
-        let cur = Weak::as_ptr(&w.read());
-        assert!(unsafe { w.compare_exchange(cur, None, SeqCst, SeqCst) }.is_ok());
+        assert!(w
+            .compare_exchange(&cur, new.clone(), SeqCst, SeqCst)
+            .is_err());
+        // empty the cell so `read` hands out a dangling weak with the stored metadata
+        let held = w.take();
+        let dangling = w.read();
+        // an empty cell matches the dangling weak...
+        assert!(w.compare_exchange(&dangling, held, SeqCst, SeqCst).is_ok());
+        // ...and a dangling `new` clears it
+        let cur = w.read();
+        assert!(w.compare_exchange(&cur, dangling, SeqCst, SeqCst).is_ok());
         assert!(w.upgrade().is_none());
     }
 
@@ -677,10 +640,10 @@ mod test {
             .collect();
         let rounds = if cfg!(miri) { 20 } else { 20_000 };
         for i in 0..rounds {
-            let cur = Arc::as_ptr(&c.read().unwrap());
+            let cur = c.read().unwrap();
             let new = Arc::new(i);
             // nobody else writes, so it always succeeds
-            let r = unsafe { c.compare_exchange(cur, Some(&new), SeqCst, SeqCst) };
+            let r = c.compare_exchange(Some(&cur), Some(new), SeqCst, SeqCst);
             assert!(r.is_ok(), "spurious compare_exchange failure at {i}");
         }
         stop.store(true, SeqCst);

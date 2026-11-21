@@ -42,8 +42,9 @@ fn is_dangling<T: ?Sized>(ptr: *const T) -> bool {
 /// - `some()` and `new()` need `T: Sized`, an unsized cell is created from an
 ///   existing `Arc`, or empty with `none()` (or `Default`). An empty unsized cell
 ///   has no pointer metadata yet, the first value written decides it. Until then
-///   `upgrade` returns `None`, but `read`, `take`, `write` and `into_weak` panic since
-///   they cannot build a dangling `Weak` without metadata.
+///   `upgrade` returns `None`, but `read`, `take`, `write` and `into_weak` panic
+///   since they cannot build a dangling `Weak` without metadata; so does
+///   `compare_exchange` when it succeeds and the old value is empty.
 /// - By default later writes need the same pointer metadata (the slice length or
 ///   the `dyn Trait` vtable) as the first value, otherwise the write panics.
 ///   It is never undefined behavior, but the vtable address of a type is not
@@ -181,43 +182,20 @@ impl<T: ?Sized> RcuWeak<T> {
         ManuallyDrop::into_inner(old_value)
     }
 
-    /// Replace the value with `new` only if the cell currently holds
-    /// `current`, compared by the address of the target, and return whether the
-    /// exchange happened.
+    /// Stores `new` into the RcuWeak if the cell currently holds `current`,
+    /// compared by the address of the target. An empty cell and a dangling weak
+    /// (`Weak::new()`, or the `Weak` returned by [`read`](Self::read) for an
+    /// empty cell) are considered the same, so a dangling `current` matches an
+    /// empty cell, and a dangling `new` clears it.
     ///
-    /// An empty cell and a dangling weak (`Weak::new()`, or the `Weak` returned
-    /// by [`read`](Self::read) for an empty cell) are considered the same, so a
-    /// dangling `new` clears the cell.
+    /// `new` is taken by value, so the caller's weak ref is moved into the cell
+    /// without a refcount change.
     ///
-    /// This is a safe wrapper around [`compare_exchange`](Self::compare_exchange)
-    /// that discards the returned pointer. If the values differ the cell is left
-    /// untouched and no writer lock is taken, so it is cheaper than
-    /// [`update`](Self::update) for a conditional write.
-    #[inline]
-    pub fn compare_and_swap(&self, current: &Weak<T>, new: Option<&Weak<T>>) -> bool {
-        // Safety: the returned pointer is neither dereferenced nor turned into
-        // a `Weak`, and both arguments are valid for the duration of the call.
-        unsafe {
-            self.compare_exchange(
-                Weak::as_ptr(current),
-                new,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-        }
-        .is_ok()
-    }
-
-    /// Stores the optional `Weak` ref `new` into the RcuWeak if the current
-    /// value is the same as `current`, compared by the address of the target.
+    /// On success the previous value is returned as an owned `Weak`, a dangling
+    /// weak if the cell was empty.
     ///
-    /// An empty cell and a dangling weak (`Weak::new()`) are considered the same,
-    /// so `current` may be a pointer to a dangling weak, and a dangling `new`
-    /// clears the cell.
-    ///
-    /// The return value is a result indicating whether the new value was written and
-    /// containing the previous value. On success this value is guaranteed to be equal
-    /// to `current`.
+    /// On failure the cell is left untouched and `new` is returned back, so the
+    /// caller can reuse it for another attempt.
     ///
     /// This method takes two `Ordering` arguments to describe the memory
     /// ordering of this operation. `success` describes the required ordering for the
@@ -228,78 +206,57 @@ impl<T: ?Sized> RcuWeak<T> {
     /// `Relaxed`. The failure ordering can only be `SeqCst`, `Acquire` or `Relaxed`
     /// and must be equivalent to or weaker than the success ordering.
     ///
-    /// # Safety
-    ///
-    /// don't deref the returned pointer, and don't turn it back into a `Weak` with
-    /// `Weak::from_raw`: the exchange releases the old weak ref, so the allocation
-    /// may be deallocated by other threads
-    ///
     /// # Examples
     ///
     /// ```
     /// use rcu_cell::RcuWeak;
-    /// use std::sync::{Arc, Weak};
+    /// use std::sync::Arc;
     /// use std::sync::atomic::Ordering::SeqCst;
     ///
     /// let a = Arc::new(1234);
     /// let b = Arc::new(5678);
     /// let w = RcuWeak::from(Arc::downgrade(&a));
-    /// let wb = Arc::downgrade(&b);
     ///
-    /// let curr = Weak::as_ptr(&w.read());
-    /// let res = unsafe { w.compare_exchange(curr, Some(&wb), SeqCst, SeqCst) };
+    /// let curr = w.read();
+    /// let res = w.compare_exchange(&curr, Arc::downgrade(&b), SeqCst, SeqCst);
     /// assert!(res.is_ok());
     /// assert_eq!(w.upgrade().as_deref(), Some(&5678));
     /// ```
-    pub unsafe fn compare_exchange<'a>(
+    pub fn compare_exchange(
         &self,
-        current: *const T,
-        new: Option<&'a Weak<T>>,
+        current: &Weak<T>,
+        new: Weak<T>,
         success: Ordering,
         failure: Ordering,
-    ) -> Result<*const T, *const T>
-    where
-        T: 'a,
-    {
+    ) -> Result<Weak<T>, Weak<T>> {
         // an empty cell and a dangling weak are the same, both are stored as an empty link
-        let current_ptr = match NonNull::new(current as *mut T) {
-            Some(ptr) if !is_dangling(ptr.as_ptr()) => Some(ptr),
-            _ => None,
+        let current_ptr = {
+            let ptr = Weak::as_ptr(current);
+            (!is_dangling(ptr)).then(|| unsafe { NonNull::new_unchecked(ptr as *mut T) })
         };
 
-        // Take the cell's weak ref before the pointer is published: once the link
-        // holds it, a concurrent writer may swap it out and drop it, so the cell
-        // must already own it. The ref is released again if the exchange fails.
-        let new_ptr = new.and_then(|data| {
-            let ptr = Weak::as_ptr(data);
-            // a dangling weak is stored as an empty link
-            if is_dangling(ptr) {
-                return None;
-            }
+        // a dangling `new` clears the cell, so it is stored as an empty link
+        let ptr = Weak::as_ptr(&new);
+        let dangling = is_dangling(ptr);
+        if !dangling {
             self.link.check_meta(ptr);
-            Some(unsafe { NonNull::new_unchecked(Weak::into_raw(Weak::clone(data)) as *mut T) })
-        });
+        }
+        // the caller's weak ref moves into the raw pointer; a failed exchange
+        // turns it back into a `Weak` and hands it back
+        let new_ptr = self.weak_to_ptr(new);
 
-        let to_raw = |ptr: Option<NonNull<T>>| match ptr {
-            Some(p) => p.as_ptr() as *const T,
-            None => self.link.null(),
-        };
-
-        match self
-            .link
-            .compare_exchange(current_ptr, new_ptr, success, failure)
-        {
-            Ok(old) => {
-                // drop the weak ref held by the cell
-                let _ = ptr_to_weak(old);
-                Ok(current)
-            }
-            Err(actual) => {
-                // we failed to exchange, so give the weak ref we took back
-                if let Some(ptr) = new_ptr {
-                    drop(unsafe { Weak::from_raw(ptr.as_ptr()) });
-                }
-                Err(to_raw(actual))
+        // Safety: `new_ptr` was built by `Weak::into_raw` and is owned by the cell
+        // on success (or turned back into the caller's `Weak` below on failure),
+        // and `current_ptr` is only compared as an address, never dereferenced.
+        match unsafe {
+            self.link
+                .compare_exchange(current_ptr, new_ptr, success, failure)
+        } {
+            Ok(old) => Ok(self.weak_from_link(old)),
+            Err(_) => {
+                // the exchange failed, so the cell never took the weak ref we made
+                // with `Weak::into_raw`; hand the caller's `new` back
+                Err(self.weak_from_link(new_ptr))
             }
         }
     }

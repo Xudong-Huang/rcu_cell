@@ -206,34 +206,19 @@ impl<T: ?Sized> RcuCell<T> {
         ManuallyDrop::into_inner(old_value)
     }
 
-    /// Replace the value with `new` only if the cell currently holds
-    /// `current`, and return whether the exchange happened.
+    /// Stores the optional Arc ref `new` into the RcuCell if the cell currently
+    /// holds `current`, compared by the address of the target. `current` is
+    /// `None` for an empty cell.
     ///
-    /// This is a safe wrapper around [`compare_exchange`](Self::compare_exchange)
-    /// that discards the returned pointer. If the values differ the cell is left
-    /// untouched and no writer lock is taken, so it is cheaper than
-    /// [`update`](Self::update) for a conditional write.
-    #[inline]
-    pub fn compare_and_swap(&self, current: &Arc<T>, new: Option<&Arc<T>>) -> bool {
-        // Safety: the returned pointer is neither dereferenced nor turned into
-        // an `Arc`, and both arguments are valid for the duration of the call.
-        unsafe {
-            self.compare_exchange(
-                Arc::as_ptr(current),
-                new,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-        }
-        .is_ok()
-    }
-
-    /// Stores the optional Arc ref `new` into the RcuCell if the current
-    /// value is the same as `current`. The tag is also taken into account, so two pointers to the
-    /// same object, but with different tags, will not be considered equal.
+    /// `new` is taken by value, so the caller's ref is moved into the cell
+    /// without a refcount change.
     ///
-    /// The return value is a result indicating whether the new value was written and containing the previous value.
-    /// On success this value is guaranteed to be equal to current.
+    /// On success the previous value is returned as an owned `Arc` (an empty
+    /// cell is `None`), so the caller drops it instead of the cell.
+    ///
+    /// On failure the cell is left untouched and `new` is returned back, so the
+    /// caller can reuse it for another attempt. `Err(None)` means the caller
+    /// passed `None` as `new`.
     ///
     /// This method takes two `Ordering` arguments to describe the memory
     /// ordering of this operation. `success` describes the required ordering for the
@@ -244,14 +229,10 @@ impl<T: ?Sized> RcuCell<T> {
     /// `Relaxed`. The failure ordering can only be `SeqCst`, `Acquire` or `Relaxed`
     /// and must be equivalent to or weaker than the success ordering.
     ///
-    /// # Safety
-    ///
-    /// don't deref the returned pointer, it's may be dropped by other threads
-    ///
     /// # Examples
     ///
     /// ```
-    /// use rcu_cell::{RcuCell, ArcPointer};
+    /// use rcu_cell::RcuCell;
     ///
     /// use std::sync::Arc;
     /// use std::sync::atomic::Ordering::SeqCst;
@@ -259,49 +240,40 @@ impl<T: ?Sized> RcuCell<T> {
     /// let a = RcuCell::new(1234);
     ///
     /// let curr = a.read();
-    /// let res1 = unsafe { a.compare_exchange(curr.as_ptr(), None, SeqCst, SeqCst) }.unwrap();
-    /// let res2 = unsafe { a.compare_exchange(res1, Some(&Arc::new(5678)), SeqCst, SeqCst) };
+    /// let res1 = a.compare_exchange(curr.as_ref(), None, SeqCst, SeqCst).unwrap();
+    /// let res2 = a.compare_exchange(res1.as_ref(), Some(Arc::new(5678)), SeqCst, SeqCst);
     /// ```
-    pub unsafe fn compare_exchange<'a>(
+    pub fn compare_exchange(
         &self,
-        current: *const T,
-        new: Option<&'a Arc<T>>,
+        current: Option<&Arc<T>>,
+        new: Option<Arc<T>>,
         success: Ordering,
         failure: Ordering,
-    ) -> Result<*const T, *const T>
-    where
-        T: 'a,
-    {
-        // Take the cell's ref before the pointer is published: once the link holds
-        // it, a concurrent writer may swap it out and drop it, so the cell must
-        // already own it. The ref is released again if the exchange fails.
+    ) -> Result<Option<Arc<T>>, Option<Arc<T>>> {
+        // The caller hands its ref over before the pointer is published: once the
+        // link holds it, a concurrent writer may swap it out and drop it, and that
+        // is fine because the cell owns that ref. If the exchange fails, the ref
+        // is taken back and dropped.
         let new_ptr = new.map(|data| {
-            let ptr = Arc::as_ptr(data);
+            let ptr = Arc::as_ptr(&data);
             self.link.check_meta(ptr);
-            unsafe { NonNull::new_unchecked(Arc::into_raw(Arc::clone(data)) as *mut T) }
+            unsafe { NonNull::new_unchecked(Arc::into_raw(data) as *mut T) }
         });
-        let current = NonNull::new(current as *mut T);
+        // a reference to an Arc is never null, so the address is a valid non-null pointer
+        let current = current.map(|data| NonNull::from(&**data));
 
-        let to_raw = |ptr: Option<NonNull<T>>| match ptr {
-            Some(p) => p.as_ptr() as *const T,
-            None => self.link.null(),
-        };
-
-        match self
-            .link
-            .compare_exchange(current, new_ptr, success, failure)
-        {
-            Ok(old) => {
-                // drop the old arc in the rcu cell
-                let _ = ptr_to_arc(old);
-                Ok(to_raw(old))
-            }
-            Err(actual) => {
-                // we failed to exchange, so give the ref we took back
-                if let Some(ptr) = new_ptr {
-                    drop(unsafe { Arc::from_raw(ptr.as_ptr()) });
-                }
-                Err(to_raw(actual))
+        // Safety: `new_ptr` was built by `Arc::into_raw` and is owned by the
+        // cell (or dropped below on failure), and `current` is only compared as
+        // an address, never dereferenced.
+        match unsafe {
+            self.link
+                .compare_exchange(current, new_ptr, success, failure)
+        } {
+            Ok(old) => Ok(ptr_to_arc(old)),
+            Err(_) => {
+                // the exchange failed, so the cell never took the ref we made
+                // with `Arc::into_raw`; hand the caller's `new` back unwrapped
+                Err(new_ptr.map(|ptr| unsafe { Arc::from_raw(ptr.as_ptr()) }))
             }
         }
     }

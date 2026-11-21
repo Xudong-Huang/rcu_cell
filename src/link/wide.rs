@@ -194,13 +194,6 @@ impl<T: ?Sized> LinkWrapper<T> {
         NonNull::new(Self::join_raw(addr, meta)? as *mut T)
     }
 
-    /// a null pointer, panics if `T` is unsized and no value was ever written
-    #[inline]
-    pub(crate) fn null(&self) -> *const T {
-        Self::join_raw(0, self.load(Ordering::Relaxed).1)
-            .expect("a null pointer of an unsized type needs the metadata of a written value")
-    }
-
     #[inline]
     fn load(&self, order: Ordering) -> Pair {
         self.storage.load(Self::IS_THIN, order)
