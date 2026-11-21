@@ -42,9 +42,12 @@ fn is_dangling<T: ?Sized>(ptr: *const T) -> bool {
 /// - `some()` and `new()` need `T: Sized`, an unsized cell is created from an
 ///   existing `Arc`, or empty with `none()` (or `Default`). An empty unsized cell
 ///   has no pointer metadata yet, the first value written decides it. Until then
-///   `upgrade` returns `None`, but `read`, `take`, `write` and `into_weak` panic
-///   since they cannot build a dangling `Weak` without metadata; so does
-///   `compare_exchange` when it succeeds and the old value is empty.
+///   `upgrade` returns `None`, while `read`, `take` and `into_weak` panic since
+///   they must return a dangling `Weak` and have no metadata to build it with.
+///   `write` and `compare_exchange` set the metadata from their `new` value
+///   first, so they only panic when that value is dangling and no metadata was
+///   set yet; they then have to return a dangling `Weak`, as the old value or
+///   as the failed `new`.
 /// - By default later writes need the same pointer metadata (the slice length or
 ///   the `dyn Trait` vtable) as the first value, otherwise the write panics.
 ///   It is never undefined behavior, but the vtable address of a type is not

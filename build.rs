@@ -13,10 +13,17 @@ pub static A: core::sync::atomic::AtomicU128 = core::sync::atomic::AtomicU128::n
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-env-changed=RCU_CELL_FORCE_NARROW");
 
     println!("cargo:rustc-check-cfg=cfg(rcu_cell_wide)");
     println!("cargo:rustc-check-cfg=cfg(rcu_cell_atomic_u128)");
     println!("cargo:rustc-check-cfg=cfg(rcu_cell_cx16)");
+
+    // `RCU_CELL_FORCE_NARROW=1` selects the narrow fallback even when a 128-bit atomic
+    // is available, so both implementations can be tested on the same machine
+    if force_narrow() {
+        return;
+    }
 
     // `rcu_cell_wide`: a lock free 128-bit atomic is available, either the core one
     // (`rcu_cell_atomic_u128`) or our own `cmpxchg16b` one (`rcu_cell_cx16`)
@@ -27,6 +34,10 @@ fn main() {
         println!("cargo:rustc-cfg=rcu_cell_cx16");
         println!("cargo:rustc-cfg=rcu_cell_wide");
     }
+}
+
+fn force_narrow() -> bool {
+    env::var("RCU_CELL_FORCE_NARROW").is_ok_and(|v| !v.is_empty() && v != "0")
 }
 
 // our own atomic is not usable under Miri

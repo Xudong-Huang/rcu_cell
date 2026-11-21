@@ -25,6 +25,28 @@ mod test {
     use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::sync::Barrier;
 
+    // Sizes for the concurrency tests. Miri interprets every instruction and thread
+    // switch, so it runs the same tests with a much smaller size; the native runs use
+    // enough iterations for the threads to overlap.
+    #[cfg(miri)]
+    mod size {
+        pub const READERS: usize = 1;
+        pub const READER_READS: usize = 4;
+        pub const CAS_ROUNDS: usize = 2;
+        pub const WEAK_OPS: usize = 4;
+        pub const CELL_OPS: u64 = 4;
+        pub const DYN_SWAPS: u64 = 4;
+    }
+    #[cfg(not(miri))]
+    mod size {
+        pub const READERS: usize = 4;
+        pub const READER_READS: usize = 200_000;
+        pub const CAS_ROUNDS: usize = 20_000;
+        pub const WEAK_OPS: usize = 5_000;
+        pub const CELL_OPS: u64 = 2_000;
+        pub const DYN_SWAPS: u64 = 20_000;
+    }
+
     #[test]
     fn test_default() {
         let x = RcuCell::<u32>::default();
@@ -386,6 +408,13 @@ mod test {
         }
     }
 
+    // all the `Small` values are coerced in this one function, so they share a single
+    // vtable address, which the narrow link requires
+    #[inline(never)]
+    fn small_id(v: u32) -> Arc<dyn Id> {
+        Arc::new(Small(v))
+    }
+
     /// whether unsized values with different pointer metadata can be swapped in a cell
     const WIDE_ATOMIC: bool = cfg!(rcu_cell_wide);
 
@@ -564,22 +593,26 @@ mod test {
         assert_eq!(w.upgrade().unwrap().id(), 1);
     }
 
+    // Miri gives every unsizing its own vtable, which the narrow link rejects
     #[test]
+    #[cfg_attr(
+        all(miri, not(rcu_cell_wide)),
+        ignore = "Miri gives every unsizing its own vtable"
+    )]
     fn test_dyn_concurrent_swap() {
         extern crate std;
-        if !WIDE_ATOMIC {
-            return;
-        }
-        const N: u64 = if cfg!(miri) { 50 } else { 20000 };
-        let c: Arc<RcuCell<dyn Id>> = Arc::new(RcuCell::from(Arc::new(Small(1)) as Arc<dyn Id>));
+        const N: u64 = size::DYN_SWAPS;
+        let c: Arc<RcuCell<dyn Id>> = Arc::new(RcuCell::from(small_id(1)));
         let writer = {
             let c = c.clone();
             std::thread::spawn(move || {
                 for i in 0..N {
-                    if i % 2 == 0 {
+                    // the narrow link only accepts values with the metadata it was
+                    // created with, the wide link can switch implementors
+                    if WIDE_ATOMIC && i % 2 == 0 {
                         c.write(Arc::new(Big(1, i)) as Arc<dyn Id>);
                     } else {
-                        c.write(Arc::new(Small(1)) as Arc<dyn Id>);
+                        c.write(small_id(1));
                     }
                 }
             })
@@ -591,7 +624,11 @@ mod test {
                     for _ in 0..N {
                         // a torn address/vtable pair would return a wrong id or crash
                         let id = c.read().unwrap().id();
-                        assert!(id == 1 || id == 101);
+                        if WIDE_ATOMIC {
+                            assert!(id == 1 || id == 101);
+                        } else {
+                            assert_eq!(id, 1);
+                        }
                     }
                 })
             })
@@ -624,30 +661,27 @@ mod test {
     // hold the cell at that moment
     #[test]
     fn test_compare_exchange_with_readers() {
-        use core::sync::atomic::AtomicBool;
         use Ordering::SeqCst;
         let c = Arc::new(RcuCell::new(1u32));
-        let stop = Arc::new(AtomicBool::new(false));
-        let readers: std::vec::Vec<_> = (0..4)
+        // the readers are bounded so the test stays fast under Miri; natively they
+        // are busy for longer than the compare-exchange loop below
+        let readers: std::vec::Vec<_> = (0..size::READERS)
             .map(|_| {
                 let c = c.clone();
-                let stop = stop.clone();
                 std::thread::spawn(move || {
-                    while !stop.load(SeqCst) {
+                    for _ in 0..size::READER_READS {
                         let _ = c.read();
                     }
                 })
             })
             .collect();
-        let rounds = if cfg!(miri) { 20 } else { 20_000 };
-        for i in 0..rounds {
+        for i in 0..size::CAS_ROUNDS {
             let cur = c.read().unwrap();
-            let new = Arc::new(i);
+            let new = Arc::new(i as u32);
             // nobody else writes, so it always succeeds
             let r = c.compare_exchange(Some(&cur), Some(new), SeqCst, SeqCst);
             assert!(r.is_ok(), "spurious compare_exchange failure at {i}");
         }
-        stop.store(true, SeqCst);
         for r in readers {
             r.join().unwrap();
         }
@@ -738,5 +772,342 @@ mod test {
         // released with the right layout
         assert_eq!(&*old, &[1u8, 2, 3][..]);
         assert!(cell.read().is_none());
+    }
+
+    #[test]
+    fn test_from_option() {
+        let c: RcuCell<u32> = RcuCell::from(None::<Arc<u32>>);
+        assert!(c.is_none());
+        assert!(c.read().is_none());
+
+        let a = Arc::new(3u32);
+        let c: RcuCell<u32> = RcuCell::from(Some(a.clone()));
+        assert!(c.arc_eq(&a));
+        assert_eq!(c.read().map(|v| *v), Some(3));
+    }
+
+    #[test]
+    fn test_new_none() {
+        let c: RcuCell<u32> = RcuCell::new(None);
+        assert!(c.is_none());
+        assert!(c.read().is_none());
+        assert!(c.take().is_none());
+    }
+
+    // guards the forced-narrow CI rows: a stale build script must not silently
+    // test the wide link while claiming to test the fallback
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn test_forced_narrow_is_active() {
+        let forced =
+            std::env::var("RCU_CELL_FORCE_NARROW").is_ok_and(|v| !v.is_empty() && v != "0");
+        if forced {
+            assert!(
+                !cfg!(rcu_cell_wide),
+                "RCU_CELL_FORCE_NARROW is set but the wide link was built"
+            );
+        }
+    }
+
+    #[test]
+    fn test_into_arc() {
+        let c = RcuCell::new(5u32);
+        let a = c.into_arc().unwrap();
+        assert_eq!(*a, 5);
+        // the cell's ref is transferred, not cloned
+        assert_eq!(Arc::strong_count(&a), 1);
+
+        let c = RcuCell::<u32>::none();
+        assert!(c.into_arc().is_none());
+
+        // the metadata of an unsized value is carried out of the cell
+        let c: RcuCell<[u8]> = RcuCell::from(Arc::<[u8]>::from(&[1u8, 2, 3][..]));
+        let a = c.into_arc().unwrap();
+        assert_eq!(&*a, &[1u8, 2, 3][..]);
+        assert_eq!(Arc::strong_count(&a), 1);
+    }
+
+    #[test]
+    fn test_into_weak() {
+        let a = Arc::new(5u32);
+        let w: RcuWeak<u32> = RcuWeak::from(Arc::downgrade(&a));
+        let weak = w.into_weak();
+        assert_eq!(weak.upgrade().as_deref(), Some(&5));
+        // the cell's weak ref is transferred, not cloned
+        assert_eq!(Arc::weak_count(&a), 1);
+        drop(weak);
+        assert_eq!(Arc::weak_count(&a), 0);
+
+        let w: RcuWeak<u32> = RcuWeak::new();
+        assert!(w.into_weak().upgrade().is_none());
+
+        let b: Arc<[u8]> = Arc::from(&[1u8, 2][..]);
+        let w: RcuWeak<[u8]> = RcuWeak::from(Arc::downgrade(&b));
+        let weak = w.into_weak();
+        assert_eq!(&*weak.upgrade().unwrap(), &[1u8, 2][..]);
+    }
+
+    #[test]
+    fn test_weak_eq_and_ptr_eq() {
+        let a = Arc::new(1u32);
+        let b = Arc::new(2u32);
+        let wa = Arc::downgrade(&a);
+        let w1 = RcuWeak::from(wa.clone());
+        let w2 = RcuWeak::from(wa.clone());
+        assert!(w1.weak_eq(&wa));
+        assert!(RcuWeak::ptr_eq(&w1, &w2));
+
+        let wb: RcuWeak<u32> = RcuWeak::from(Arc::downgrade(&b));
+        assert!(!w1.weak_eq(&Arc::downgrade(&b)));
+        assert!(!RcuWeak::ptr_eq(&w1, &wb));
+
+        // two empty cells carry the same (no) pointer
+        let e1: RcuWeak<u32> = RcuWeak::new();
+        let e2: RcuWeak<u32> = RcuWeak::new();
+        assert!(RcuWeak::ptr_eq(&e1, &e2));
+        assert!(!w1.weak_eq(&alloc::sync::Weak::new()));
+    }
+
+    #[test]
+    fn test_compare_exchange_err_none() {
+        use Ordering::SeqCst;
+        let c = RcuCell::new(1u32);
+        // the cell is not empty, so a `None` current fails and `None` comes back
+        assert!(matches!(
+            c.compare_exchange(None, None, SeqCst, SeqCst),
+            Err(None)
+        ));
+        assert_eq!(c.read().map(|v| *v), Some(1));
+
+        // an empty cell matches `None`, so the empty exchange succeeds
+        c.take();
+        assert!(matches!(
+            c.compare_exchange(None, None, SeqCst, SeqCst),
+            Ok(None)
+        ));
+        assert!(c.is_none());
+    }
+
+    #[test]
+    fn test_compare_exchange_orderings() {
+        use Ordering::{AcqRel, Acquire, Relaxed, Release, SeqCst};
+        let c = RcuCell::new(1u32);
+        let orderings = [
+            (Relaxed, Relaxed),
+            (Acquire, Relaxed),
+            (Release, Relaxed),
+            (AcqRel, Acquire),
+            (SeqCst, SeqCst),
+        ];
+        for (success, failure) in orderings {
+            let cur = c.read().unwrap();
+            let next = *cur + 1;
+            let old = c
+                .compare_exchange(Some(&cur), Some(Arc::new(next)), success, failure)
+                .ok()
+                .unwrap()
+                .unwrap();
+            assert_eq!(*old, *cur);
+            assert_eq!(c.read().map(|v| *v), Some(next));
+        }
+    }
+
+    #[test]
+    fn test_debug() {
+        let c = RcuCell::new(1u32);
+        assert!(std::format!("{:?}", c).contains("Link"));
+        let a = Arc::new(2u32);
+        let w = RcuWeak::from(Arc::downgrade(&a));
+        assert!(std::format!("{:?}", w).contains("Link"));
+    }
+
+    // an empty unsized weak has no metadata, so building a dangling `Weak` panics
+    #[test]
+    #[should_panic(expected = "dangling weak of an unsized type")]
+    fn test_unsized_weak_read_empty_panics() {
+        let w: RcuWeak<dyn Id> = RcuWeak::new();
+        let _ = w.read();
+    }
+
+    #[test]
+    #[should_panic(expected = "dangling weak of an unsized type")]
+    fn test_unsized_weak_take_empty_panics() {
+        let w: RcuWeak<dyn Id> = RcuWeak::new();
+        let _ = w.take();
+    }
+
+    #[test]
+    #[should_panic(expected = "dangling weak of an unsized type")]
+    fn test_unsized_weak_into_weak_empty_panics() {
+        let w: RcuWeak<dyn Id> = RcuWeak::new();
+        let _ = w.into_weak();
+    }
+
+    #[test]
+    #[should_panic(expected = "dangling weak of an unsized type")]
+    fn test_unsized_weak_write_dangling_empty_panics() {
+        let w: RcuWeak<dyn Id> = RcuWeak::new();
+        let dangling: alloc::sync::Weak<dyn Id> = alloc::sync::Weak::<Small>::new();
+        let _ = w.write(dangling);
+    }
+
+    #[test]
+    #[should_panic(expected = "dangling weak of an unsized type")]
+    fn test_unsized_weak_compare_exchange_empty_panics() {
+        use Ordering::SeqCst;
+        let w: RcuWeak<dyn Id> = RcuWeak::new();
+        let dangling: alloc::sync::Weak<dyn Id> = alloc::sync::Weak::<Small>::new();
+        // the exchange succeeds and must return the old (dangling) weak, but the
+        // cell has no metadata to build it with
+        let _ = w.compare_exchange(&dangling, dangling.clone(), SeqCst, SeqCst);
+    }
+
+    // writing a live weak to an empty unsized cell fixes the metadata first, so
+    // returning the old (empty) value as a dangling weak works
+    #[test]
+    fn test_unsized_weak_write_on_empty() {
+        let a = Arc::new(Small(3)) as Arc<dyn Id>;
+        let w: RcuWeak<dyn Id> = RcuWeak::new();
+        let old = w.write(Arc::downgrade(&a));
+        assert!(old.upgrade().is_none());
+        assert_eq!(w.upgrade().unwrap().id(), 3);
+        assert!(w.take().upgrade().is_some());
+        assert!(w.upgrade().is_none());
+    }
+
+    #[test]
+    fn test_weak_drop_releases_refs() {
+        let a = Arc::new(1u32);
+        let b = Arc::new(2u32);
+        let w: RcuWeak<u32> = RcuWeak::from(Arc::downgrade(&a));
+        assert_eq!(Arc::weak_count(&a), 1);
+
+        // replacing the value releases the old weak
+        let old = w.write(Arc::downgrade(&b));
+        assert!(old.upgrade().is_some());
+        assert_eq!(Arc::weak_count(&a), 1); // `old`
+        assert_eq!(Arc::weak_count(&b), 1); // the cell
+        drop(old);
+        assert_eq!(Arc::weak_count(&a), 0);
+
+        // dropping the cell releases the weak it owns
+        drop(w);
+        assert_eq!(Arc::weak_count(&b), 0);
+    }
+
+    #[test]
+    fn test_weak_concurrent() {
+        const N: usize = size::WEAK_OPS;
+        let a = Arc::new(1u32);
+        let b = Arc::new(2u32);
+        let w: Arc<RcuWeak<u32>> = Arc::new(RcuWeak::from(Arc::downgrade(&a)));
+
+        let readers: std::vec::Vec<_> = (0..3)
+            .map(|_| {
+                let w = w.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..size::READER_READS {
+                        let cur = w.read();
+                        // the writers only store weaks to live `Arc`s, so every
+                        // weak in the cell upgrades
+                        assert!(cur.upgrade().is_some());
+                        assert!(w.upgrade().is_some());
+                    }
+                })
+            })
+            .collect();
+
+        let writers: std::vec::Vec<_> = (0..2)
+            .map(|i| {
+                let w = w.clone();
+                let a = a.clone();
+                let b = b.clone();
+                std::thread::spawn(move || {
+                    for j in 0..N {
+                        if (i + j) % 2 == 0 {
+                            drop(w.write(Arc::downgrade(&a)));
+                        } else {
+                            let old = w
+                                .update(|_| Some(Arc::downgrade(&b)))
+                                .expect("the cell is never empty");
+                            drop(old);
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        for t in writers {
+            t.join().unwrap();
+        }
+        for t in readers {
+            t.join().unwrap();
+        }
+
+        assert!(w.upgrade().is_some());
+        drop(w);
+        // every weak the cell owned was released
+        assert_eq!(Arc::weak_count(&a), 0);
+        assert_eq!(Arc::weak_count(&b), 0);
+    }
+
+    #[test]
+    fn test_concurrent_update_and_write() {
+        static LIVE: AtomicUsize = AtomicUsize::new(0);
+        struct Foo(u64);
+        impl Foo {
+            fn new(v: u64) -> Self {
+                LIVE.fetch_add(1, Ordering::Relaxed);
+                Foo(v)
+            }
+        }
+        impl Drop for Foo {
+            fn drop(&mut self) {
+                LIVE.fetch_sub(1, Ordering::Relaxed);
+            }
+        }
+
+        const N: u64 = size::CELL_OPS;
+        let c: Arc<RcuCell<Foo>> = Arc::new(RcuCell::new(Foo::new(0)));
+
+        let readers: std::vec::Vec<_> = (0..3)
+            .map(|_| {
+                let c = c.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..size::READER_READS {
+                        let _ = c.read();
+                    }
+                })
+            })
+            .collect();
+
+        let updater = {
+            let c = c.clone();
+            std::thread::spawn(move || {
+                for _ in 0..N {
+                    c.update(|v| Some(Foo::new(v.map_or(1, |v| v.0 + 1))));
+                }
+            })
+        };
+        let writer = {
+            let c = c.clone();
+            std::thread::spawn(move || {
+                for i in 0..N {
+                    c.write(Foo::new(i));
+                }
+            })
+        };
+
+        updater.join().unwrap();
+        writer.join().unwrap();
+        for t in readers {
+            t.join().unwrap();
+        }
+
+        // every value that was created has been dropped exactly once, except the
+        // one the cell still owns
+        assert_eq!(LIVE.load(Ordering::Relaxed), 1);
+        drop(c);
+        assert_eq!(LIVE.load(Ordering::Relaxed), 0);
     }
 }

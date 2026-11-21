@@ -20,24 +20,56 @@ jobs:
       - name: Checkout sources
         uses: actions/checkout@v4
       - name: Install toolchain
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          profile: minimal
-          toolchain: stable
-          override: true
           components: rustfmt, clippy
       - name: cargo fmt --check
-        uses: actions-rs/cargo@v1
-        with:
-          command: fmt
-          args: --all -- --check
+        run: cargo fmt --all -- --check
       - name: Run cargo clippy
-        uses: actions-rs/cargo@v1
+        run: cargo clippy --tests -- -D warnings
+
+  test:
+    name: test (${{ matrix.toolchain }}, ${{ matrix.link }} link)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      # stable builds the cmpxchg16b link, nightly the core AtomicU128 one, and
+      # the forced-narrow rows the single-word fallback
+      matrix:
+        toolchain: [stable, nightly]
+        link: [auto, narrow]
+    env:
+      # build.rs picks the narrow fallback when this is set to a nonzero value
+      RCU_CELL_FORCE_NARROW: ${{ matrix.link == 'narrow' && '1' || '0' }}
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+      - name: Install ${{ matrix.toolchain }} toolchain
+        uses: dtolnay/rust-toolchain@master
         with:
-          command: clippy
-          args: -- -D warnings
-      - name: Run cargo release tests
-        uses: actions-rs/cargo@v1
+          toolchain: ${{ matrix.toolchain }}
+      - name: Run tests
+        run: cargo test --release
+
+  miri:
+    name: miri (${{ matrix.link }} link)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        link: [auto, narrow]
+    env:
+      RCU_CELL_FORCE_NARROW: ${{ matrix.link == 'narrow' && '1' || '0' }}
+      # the link packs the address and metadata through exposed provenance on purpose
+      MIRIFLAGS: -Zmiri-permissive-provenance
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+      - name: Install nightly toolchain with miri
+        uses: dtolnay/rust-toolchain@nightly
         with:
-          command: test
-          args: --release
+          components: miri, rust-src
+      - name: Run tests under miri
+        # doctests are not supported by miri
+        run: cargo miri test --lib
