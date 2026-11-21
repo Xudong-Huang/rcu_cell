@@ -169,10 +169,10 @@ impl<T: ?Sized> RcuCell<T> {
         self.set(Some(data))
     }
 
-    /// Atomicly update the value with a closure and return the old value.
+    /// Atomically update the value with a closure and return the old value.
     /// The closure will be called with the old value and return the new value.
-    /// The closure should not take too long time, internally it's use a spin
-    /// lock to prevent other writer to update the value
+    /// The closure should not take too long, internally it uses a spin lock to
+    /// prevent other writers from updating the value
     ///
     /// The closure borrows the old value, so no `Arc` refcount increment or
     /// decrement is needed while the lock is held. If you need to own the old

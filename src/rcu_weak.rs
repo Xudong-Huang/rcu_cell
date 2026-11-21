@@ -93,14 +93,14 @@ impl<T: ?Sized> From<Weak<T>> for RcuWeak<T> {
 }
 
 impl<T: ?Sized> RcuWeak<T> {
-    /// create an dummy rcu weak cell instance, upgrade from it will return None
+    /// create a dummy rcu weak cell instance, upgrade from it will return None
     #[inline]
     pub const fn new() -> Self {
         RcuWeak {
             link: LinkWrapper::new(),
         }
     }
-    /// convert the rcu weak to a `Weak`` value
+    /// convert the rcu weak to a `Weak` value
     #[inline]
     pub fn into_weak(self) -> Weak<T> {
         let ret = self.weak_from_link(self.link.get_ref());
@@ -139,19 +139,19 @@ impl<T: ?Sized> RcuWeak<T> {
         self.weak_from_link(self.link.update(new_ptr))
     }
 
-    /// write a new `Weak` value downgrade from the `Arc`` to the cell and return the old value
+    /// write a new `Weak` value downgraded from the `Arc` to the cell and return the old value
     #[inline]
     pub fn write_arc(&self, data: &Arc<T>) -> Weak<T> {
         let new_ptr = self.weak_to_ptr(Arc::downgrade(data));
         self.weak_from_link(self.link.update(new_ptr))
     }
 
-    /// Atomicly update the value with a closure and return the old value.
+    /// Atomically update the value with a closure and return the old value.
     /// The closure will be called with the old value and return the new value;
     /// returning `None` clears the cell. The return value is the old weak value,
     /// or `None` if the cell was empty.
-    /// The closure should not take too long time, internally it's use a spin
-    /// lock to prevent other writer to update the value
+    /// The closure should not take too long, internally it uses a spin lock to
+    /// prevent other writers from updating the value
     ///
     /// The closure borrows the old value, so no `Weak` refcount increment or
     /// decrement is needed while the lock is held. If you need to own the old
@@ -271,7 +271,7 @@ impl<T: ?Sized> RcuWeak<T> {
         cloned.unwrap_or_else(|| self.weak_from_link(None))
     }
 
-    /// upgrade the innner weak value to an Arc value
+    /// upgrade the inner weak value to an Arc value
     #[inline]
     pub fn upgrade(&self) -> Option<Arc<T>> {
         let ptr = self.link.inc_ref();
