@@ -206,7 +206,7 @@ impl<T: ?Sized> RcuCell<T> {
         ManuallyDrop::into_inner(old_value)
     }
 
-    /// Stores the optional Arc ref `new` into the RcuCell if the cell currently
+    /// Stores the optional Arc `new` into the RcuCell if the cell currently
     /// holds `current`, compared by the address of the target. `current` is
     /// `None` for an empty cell.
     ///
