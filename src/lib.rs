@@ -11,7 +11,8 @@ mod rcu_weak;
 pub use rcu_cell::RcuCell;
 pub use rcu_weak::RcuWeak;
 
-// the pointer and the tag bits are packed into one word, so only 64-bit platforms are supported
+// the tag bits and the shifts that pack them assume a 64-bit pointer, so only 64-bit
+// platforms are supported
 #[cfg(not(target_pointer_width = "64"))]
 compile_error!("rcu_cell only supports 64-bit platforms");
 

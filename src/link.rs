@@ -4,8 +4,9 @@
 //
 // The 128-bit atomic is, in order of preference:
 // - `core::sync::atomic::AtomicU128`: unstable (`integer_atomics`) and only on targets
-//   with `target_has_atomic = "128"` (e.g. aarch64, s390x), so it is used only when
-//   build.rs finds that the compiler and the target support it (nightly).
+//   with `target_has_atomic = "128"` (e.g. aarch64, s390x, and x86_64 on recent
+//   nightlies), so it is used only when build.rs finds that the compiler and the
+//   target support it (nightly).
 // - our own `cmpxchg16b` based one on x86_64, only when the target feature is
 //   statically enabled (e.g. `-C target-cpu=native` or `-C target-feature=+cmpxchg16b`)
 //   or when build.rs finds that the build machine, which is also the target, supports it

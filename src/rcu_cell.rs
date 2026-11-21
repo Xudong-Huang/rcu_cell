@@ -48,13 +48,15 @@ fn same_addr<T: ?Sized>(a: Option<NonNull<T>>, b: Option<NonNull<T>>) -> bool {
 ///   guaranteed to be unique (e.g. across codegen units), so writing the same
 ///   concrete type may also panic.
 /// - With a nightly compiler, on targets that have 128-bit atomics
-///   (`target_has_atomic = "128"`, e.g. aarch64 and s390x) the address and the metadata
-///   are stored in one `core::sync::atomic::AtomicU128`, so values with different
-///   concrete types or lengths can be swapped freely and the metadata check doesn't
-///   apply. `build.rs` detects this automatically.
-/// - On x86_64 the same applies when `cmpxchg16b` is enabled at compile time or
-///   when `build.rs` finds that the build machine (also the target) supports it.
-///   The binary then needs a cpu with `cmpxchg16b`.
+///   (`target_has_atomic = "128"`, e.g. aarch64 and s390x, and x86_64 on recent
+///   nightlies) the address and the metadata are stored in one
+///   `core::sync::atomic::AtomicU128`, so values with different concrete types or
+///   lengths can be swapped freely and the metadata check doesn't apply. `build.rs`
+///   probes for this first.
+/// - On x86_64, when the core atomic is not available, the same applies when
+///   `cmpxchg16b` is enabled at compile time or when `build.rs` finds that the build
+///   machine (also the target) supports it. A built-in `cmpxchg16b` atomic is used
+///   (not under Miri). The binary then needs a cpu with `cmpxchg16b`.
 /// - Sized cells use a single `AtomicUsize` as the atomic, but in this wide mode the
 ///   cell is still 16 bytes, the size of the 128-bit atomic.
 #[derive(Debug)]
@@ -106,7 +108,7 @@ impl<T> RcuCell<T> {
         }
     }
 
-    /// create rcu cell from value that can be converted to Option<T>
+    /// create rcu cell from a value that can be converted to `Option<T>`
     #[inline]
     pub fn new(data: impl Into<Option<T>>) -> Self {
         let data = data.into();
@@ -126,7 +128,7 @@ impl<T: ?Sized> RcuCell<T> {
         }
     }
 
-    /// convert the rcu cell to an Arc value
+    /// convert the cell into its `Option<Arc<T>>`, transferring the cell's ref
     #[inline]
     pub fn into_arc(self) -> Option<Arc<T>> {
         let ptr = self.link.get_ref();
@@ -171,8 +173,8 @@ impl<T: ?Sized> RcuCell<T> {
 
     /// Atomically update the value with a closure and return the old value.
     /// The closure will be called with the old value and return the new value.
-    /// The closure should not take too long, internally it uses a spin lock to
-    /// prevent other writers from updating the value
+    /// The closure should not take too long; while it runs, an update flag makes
+    /// other writers wait
     ///
     /// The closure borrows the old value, so no `Arc` refcount increment or
     /// decrement is needed while the lock is held. If you need to own the old
@@ -206,7 +208,7 @@ impl<T: ?Sized> RcuCell<T> {
         ManuallyDrop::into_inner(old_value)
     }
 
-    /// Stores the optional Arc `new` into the RcuCell if the cell currently
+    /// Stores the optional `Arc` `new` into the RcuCell if the cell currently
     /// holds `current`, compared by the address of the target. `current` is
     /// `None` for an empty cell.
     ///

@@ -152,7 +152,6 @@ impl<T: ?Sized> LinkWrapper<T> {
         loop {
             match self.ptr().compare_exchange(old, new, success, failure) {
                 Ok(_addr) => {
-                    // assert_eq!(old, addr);
                     // the caller drops the old value, so order that drop after the
                     // release store that published it even if `success` is weaker
                     // than `Acquire`
@@ -241,9 +240,8 @@ impl<T: ?Sized> LinkWrapper<T> {
         self.ptr().fetch_sub(1, Ordering::Release);
     }
 
-    // read the inner Arc and increase the ref count
-    // to prevet other writer to update the inner Arc
-    // should be paired used with unlock_update
+    // take the inner Arc for an update: set the update flag, which makes writers
+    // wait, and return the current pointer; must be paired with unlock_update
     #[inline]
     pub(crate) fn lock_read(&self) -> Option<NonNull<T>> {
         use Ordering::*;

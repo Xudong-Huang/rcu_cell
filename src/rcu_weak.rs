@@ -39,9 +39,10 @@ fn is_dangling<T: ?Sized>(ptr: *const T) -> bool {
 /// ```
 ///
 /// Limitations:
-/// - `some()` and `new()` need `T: Sized`, an unsized cell is created from an
-///   existing `Arc`, or empty with `none()` (or `Default`). An empty unsized cell
-///   has no pointer metadata yet, the first value written decides it. Until then
+/// - `RcuWeak::new()` creates an empty cell for any `T`; an unsized cell with a
+///   value is created from an existing `Weak` (or filled later with `write_arc`).
+///   An empty unsized cell has no pointer metadata yet, the first value written
+///   decides it. Until then
 ///   `upgrade` returns `None`, while `read`, `take` and `into_weak` panic since
 ///   they must return a dangling `Weak` and have no metadata to build it with.
 ///   `write` and `compare_exchange` set the metadata from their `new` value
@@ -54,13 +55,15 @@ fn is_dangling<T: ?Sized>(ptr: *const T) -> bool {
 ///   guaranteed to be unique (e.g. across codegen units), so writing the same
 ///   concrete type may also panic.
 /// - With a nightly compiler, on targets that have 128-bit atomics
-///   (`target_has_atomic = "128"`, e.g. aarch64 and s390x) the address and the metadata
-///   are stored in one `core::sync::atomic::AtomicU128`, so values with different
-///   concrete types or lengths can be swapped freely and the metadata check doesn't
-///   apply. `build.rs` detects this automatically.
-/// - On x86_64 the same applies when `cmpxchg16b` is enabled at compile time or
-///   when `build.rs` finds that the build machine (also the target) supports it.
-///   The binary then needs a cpu with `cmpxchg16b`.
+///   (`target_has_atomic = "128"`, e.g. aarch64 and s390x, and x86_64 on recent
+///   nightlies) the address and the metadata are stored in one
+///   `core::sync::atomic::AtomicU128`, so values with different concrete types or
+///   lengths can be swapped freely and the metadata check doesn't apply. `build.rs`
+///   probes for this first.
+/// - On x86_64, when the core atomic is not available, the same applies when
+///   `cmpxchg16b` is enabled at compile time or when `build.rs` finds that the build
+///   machine (also the target) supports it. A built-in `cmpxchg16b` atomic is used
+///   (not under Miri). The binary then needs a cpu with `cmpxchg16b`.
 /// - Sized cells use a single `AtomicUsize` as the atomic, but in this wide mode the
 ///   cell is still 16 bytes, the size of the 128-bit atomic.
 #[derive(Debug)]
@@ -96,14 +99,15 @@ impl<T: ?Sized> From<Weak<T>> for RcuWeak<T> {
 }
 
 impl<T: ?Sized> RcuWeak<T> {
-    /// create a dummy rcu weak cell instance, upgrade from it will return None
+    /// create an empty rcu weak cell; upgrading it returns `None`
     #[inline]
     pub const fn new() -> Self {
         RcuWeak {
             link: LinkWrapper::new(),
         }
     }
-    /// convert the rcu weak to a `Weak` value
+    /// convert the rcu weak cell into the `Weak` it holds, or into a dangling
+    /// `Weak` if the cell is empty and has metadata (see the type limitations)
     #[inline]
     pub fn into_weak(self) -> Weak<T> {
         let ret = self.weak_from_link(self.link.get_ref());
@@ -129,7 +133,7 @@ impl<T: ?Sized> RcuWeak<T> {
         Some(unsafe { NonNull::new_unchecked(Weak::into_raw(data) as *mut T) })
     }
 
-    /// take the value from the rcu weak, leave the rcu weak with default value
+    /// take the value from the rcu weak, leaving the cell empty
     #[inline]
     pub fn take(&self) -> Weak<T> {
         self.weak_from_link(self.link.update(None))
@@ -142,7 +146,7 @@ impl<T: ?Sized> RcuWeak<T> {
         self.weak_from_link(self.link.update(new_ptr))
     }
 
-    /// write a new `Weak` value downgraded from the `Arc` to the cell and return the old value
+    /// write a `Weak` downgraded from `data` to the cell and return the old value
     #[inline]
     pub fn write_arc(&self, data: &Arc<T>) -> Weak<T> {
         let new_ptr = self.weak_to_ptr(Arc::downgrade(data));
@@ -153,8 +157,8 @@ impl<T: ?Sized> RcuWeak<T> {
     /// The closure will be called with the old value and return the new value;
     /// returning `None` clears the cell. The return value is the old weak value,
     /// or `None` if the cell was empty.
-    /// The closure should not take too long, internally it uses a spin lock to
-    /// prevent other writers from updating the value
+    /// The closure should not take too long; while it runs, an update flag makes
+    /// other writers wait
     ///
     /// The closure borrows the old value, so no `Weak` refcount increment or
     /// decrement is needed while the lock is held. If you need to own the old
@@ -188,8 +192,8 @@ impl<T: ?Sized> RcuWeak<T> {
     /// Stores `new` into the RcuWeak if the cell currently holds `current`,
     /// compared by the address of the target. An empty cell and a dangling weak
     /// (`Weak::new()`, or the `Weak` returned by [`read`](Self::read) for an
-    /// empty cell) are considered the same, so a dangling `current` matches an
-    /// empty cell, and a dangling `new` clears it.
+    /// empty cell that has metadata) are considered the same, so a dangling
+    /// `current` matches an empty cell, and a dangling `new` clears it.
     ///
     /// `new` is taken by value, so the caller's weak ref is moved into the cell
     /// without a refcount change.
@@ -293,7 +297,8 @@ impl<T: ?Sized> RcuWeak<T> {
         )
     }
 
-    /// read inner ptr and check if it is the same as the given Weak
+    /// read the inner pointer and check if it is the same as the given `Weak`;
+    /// an empty cell is not equal to a dangling `Weak`
     #[inline]
     pub fn weak_eq(&self, data: &Weak<T>) -> bool {
         same_addr(

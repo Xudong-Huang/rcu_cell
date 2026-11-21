@@ -1,7 +1,8 @@
-//! A minimal 128-bit atomic built on `cmpxchg16b` for stable rust on x86_64, used when
-//! `core::sync::atomic::AtomicU128` is not available. It is only compiled when the
-//! target feature is statically enabled, so there is no runtime detection and no lock
-//! fallback. All operations are sequentially consistent.
+//! A minimal 128-bit atomic built on `cmpxchg16b` for stable Rust on x86_64, used when
+//! `core::sync::atomic::AtomicU128` is not available. It is compiled when `cmpxchg16b`
+//! is enabled at compile time or when `build.rs` detects it on the build machine (which
+//! is also the target), so the binary needs a cpu with it; there is no runtime check
+//! and no lock fallback. All operations are sequentially consistent.
 
 use core::arch::asm;
 use core::cell::UnsafeCell;

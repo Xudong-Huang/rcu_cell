@@ -4,20 +4,19 @@
 
 # RcuCell
 
-A lockless rcu cell implementation that can be used safely in multithread context.
+A lockless RCU cell implementation that can be used safely in a multithreaded context.
 
 ## Features
 
-- Support multi-thread read and write operations.
-- The read operation would not block other read operations.
-- The read operation is always wait-free.
-- The read operation is something like Arc::clone.
-- The write operation would not block other read operations.
-- The write operation is lockless.
-- The write operation is something like Atomic Swap.
-- The RcuCell could contain no data
-- Could be compiled with no_std
-- Only 64-bit platforms are supported (the pointer and tag bits are packed into one word), building for a 32-bit target fails with a compile error
+- Supports multi-threaded reads and writes.
+- Reads do not block other reads.
+- A read is similar to `Arc::clone` and is wait-free for a sized cell. An unsized cell in the wide mode updates a 128-bit reference count with a compare-exchange loop, which is lock-free but may retry.
+- Writes do not block reads.
+- Writes are lockless.
+- A write is similar to an atomic swap.
+- The cell can be empty.
+- Works in `no_std` environments with `alloc`.
+- Only 64-bit platforms are supported (the tag and reference count bits are taken from the pointer word, and the fallback packs the address and metadata into one 64-bit word); a 32-bit build fails with a compile error.
 
 
 ## Usage
@@ -71,8 +70,8 @@ Writing a value of a *different* concrete type (e.g. a `Circle` into a cell hold
     assert_eq!(cell.read().unwrap().area(), 12);
 ```
 
-- `some()` and `new()` need `T: Sized`. An unsized cell is created from an existing `Arc`/`Weak`, or empty with `none()`/`Default`; an empty unsized cell has no pointer metadata yet, the first value written decides it. `RcuWeak::read/take/into_weak` must return a dangling `Weak<T>`, so they panic on a cell that never held an unsized value; `RcuWeak::write` and `RcuWeak::compare_exchange` take the metadata from their `new` value first, so they only panic when that value is dangling and the cell has no metadata yet (they then have to return a dangling `Weak`, as the old value or as the failed `new`); a live value sets the metadata before it is stored (`upgrade`/`read` of `RcuCell` and `RcuCell::compare_exchange` are fine).
+- `RcuCell::some`/`new` need `T: Sized`; an unsized `RcuCell` is created from an existing `Arc` and an unsized `RcuWeak` from an existing `Weak`. Either can start empty with `RcuCell::none()` / `RcuWeak::new()` (or `Default`); an empty unsized cell has no pointer metadata yet, the first value written decides it. `RcuWeak::read/take/into_weak` must return a dangling `Weak<T>`, so they panic on a cell that never held an unsized value; `RcuWeak::write` and `RcuWeak::compare_exchange` take the metadata from their `new` value first, so they only panic when that value is dangling and the cell has no metadata yet (they then have to return a dangling `Weak`, as the old value or as the failed `new`); a live value sets the metadata before it is stored (`upgrade`/`read` of `RcuCell` and `RcuCell::compare_exchange` are fine).
 - By default later writes need the same pointer metadata (slice length or `dyn` vtable) as the first value, otherwise they panic. This is never undefined behavior, but vtable addresses are not guaranteed to be unique for a type, so writing the same concrete type may also panic.
-- With a nightly compiler, on targets that have 128-bit atomics (`target_has_atomic = "128"`, e.g. aarch64 and s390x) the address and the metadata live in one `core::sync::atomic::AtomicU128`, so different concrete types or lengths can be swapped freely and the check doesn't apply. `build.rs` detects this automatically, there is nothing to enable.
-- On x86_64 (stable or nightly) the same applies when `cmpxchg16b` is enabled at compile time, e.g. `RUSTFLAGS="-C target-cpu=native"` or `-C target-feature=+cmpxchg16b`, or when the build machine (also the target) supports it, which `build.rs` detects. A small built-in `cmpxchg16b` atomic is used there (not under Miri). Without it, the single-word fallback above is used. There is no runtime detection, so a binary built this way needs a cpu with `cmpxchg16b`.
+- With a nightly compiler, on targets that have 128-bit atomics (`target_has_atomic = "128"`, e.g. aarch64 and s390x, and x86_64 on recent nightlies) the address and the metadata live in one `core::sync::atomic::AtomicU128`, so different concrete types or lengths can be swapped freely and the check doesn't apply. `build.rs` probes for this first, there is nothing to enable.
+- On x86_64, when the core atomic is not available, the same applies if `cmpxchg16b` is enabled at compile time, e.g. `RUSTFLAGS="-C target-cpu=native"` or `-C target-feature=+cmpxchg16b`, or when the build machine (also the target) supports it, which `build.rs` detects. A small built-in `cmpxchg16b` atomic is used there (not under Miri). Without either, the single-word fallback above is used. There is no runtime check in the binary, so a binary built for the built-in atomic needs a cpu with `cmpxchg16b`.
 - Sized cells use a single `AtomicUsize` as the atomic, but in the wide mode above the cell is still 16 bytes, the size of the 128-bit atomic. In the single-word fallback a sized cell is one word.

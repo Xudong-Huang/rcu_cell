@@ -49,9 +49,9 @@ fn has_cx16() -> bool {
             || has_host_cx16())
 }
 
-// `cmpxchg16b` is not part of the baseline x86_64 target, so enable it only when the
-// machine doing the build supports it and it is also the target. The binary then needs
-// a cpu with `cmpxchg16b` (every x86_64 cpu since ~2006 has it).
+// `cmpxchg16b` is not part of the baseline x86_64 target, so use the built-in atomic
+// only when the machine doing the build supports it and it is also the target. The
+// binary then needs a cpu with `cmpxchg16b` (every x86_64 cpu since ~2006 has it).
 #[cfg(target_arch = "x86_64")]
 fn has_host_cx16() -> bool {
     env::var_os("HOST") == env::var_os("TARGET")

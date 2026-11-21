@@ -135,7 +135,7 @@ impl Storage {
 
 /// A wrapper of the pointer to the inner Arc data.
 ///
-/// For a sized `T` the whole link is a single `AtomicUsize`. For an unsized `T`
+/// For a sized `T` only a single `AtomicUsize` is touched. For an unsized `T`
 /// the pointer is a fat pointer, the address (with the tag bits) and the metadata
 /// are stored in one `AtomicU128`, so they are always updated together.
 pub(crate) struct LinkWrapper<T: ?Sized> {
@@ -374,9 +374,8 @@ impl<T: ?Sized> LinkWrapper<T> {
         self.sub_ref();
     }
 
-    // read the inner Arc and increase the ref count
-    // to prevet other writer to update the inner Arc
-    // should be paired used with unlock_update
+    // take the inner Arc for an update: set the update flag, which makes writers
+    // wait, and return the current pointer; must be paired with unlock_update
     #[inline]
     pub(crate) fn lock_read(&self) -> Option<NonNull<T>> {
         use Ordering::*;
